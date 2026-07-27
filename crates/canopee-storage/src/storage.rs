@@ -18,13 +18,6 @@ impl Storage {
         self.root.clone()
     }
 
-    // pub async fn put(&self, object: &Object) -> Result<()> {
-    //     let path = format!("{}/{}", self.root, object.id.0);
-    //     let bytes = bincode::serialize(object)?;
-    //     fs::write(path, bytes).await?;
-    //     Ok(())
-    // }
-
     pub async fn put_verified(&self, object: &Object) -> Result<()> {
         if !object.verify() {
             anyhow::bail!("Invalid signature for object {}", object.id);
@@ -34,13 +27,6 @@ impl Storage {
         fs::write(path, bytes).await?;
         Ok(())
     }
-
-    // pub async fn get(&self, id: &ObjectId) -> Result<Object> {
-    //     let path = format!("{}/{}", self.root, id.0);
-    //     let bytes = fs::read(path).await?;
-    //     let object = bincode::deserialize(&bytes)?;
-    //     Ok(object)
-    // }
 
     pub async fn get_verified(&self, id: &ObjectId) -> Result<Object> {
         let path = format!("{}/{}", self.root, id.0);

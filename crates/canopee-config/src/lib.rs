@@ -30,6 +30,10 @@ impl Config {
     pub fn node_socket_path(&self) -> PathBuf {
         self.root.join("node.sock")
     }
+
+    pub fn state_path(&self) -> PathBuf {
+        self.home_dir().join("state").join("node.state")
+    }
 }
 
 impl Default for Config {

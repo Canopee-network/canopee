@@ -76,12 +76,6 @@ async fn main() {
 
         Commands::Stop => {
             let client = NodeClient::new().await.unwrap();
-
-            // if !client.is_running().await {
-            //     println!("Canopee node is not running");
-            //     return;
-            // }
-
             let response = client.request(NodeCommand::Shutdown).await.unwrap();
 
             match response {
@@ -207,12 +201,6 @@ async fn main() {
         }
 
         Commands::Start => {
-            // let client = NodeClient::new().await.unwrap();
-            // if client.is_running().await {
-            //     println!("Canopee node already running");
-            //     return;
-            // }
-
             let child = tokio::process::Command::new("cargo")
                 .args(["run", "-p", "canopee-node"])
                 .spawn()

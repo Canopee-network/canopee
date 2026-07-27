@@ -1,12 +1,17 @@
+mod state;
 use canopee_config::Config;
 use canopee_identity::Identity;
 use canopee_storage::{Export, ExportBundle, Object, ObjectId, ObjectInfo, Storage};
+use state::NodeState;
 use std::path::PathBuf;
+use time::OffsetDateTime;
+use tokio::sync::RwLock;
 
 pub struct Runtime {
     pub config: Config,
     pub identity: Identity,
     pub storage: Storage,
+    state: RwLock<NodeState>,
 }
 
 impl Runtime {
@@ -21,6 +26,26 @@ impl Runtime {
             Ok(id) => id,
             Err(_) => Identity::create(identity_path.to_str().unwrap()).await?,
         };
+        let state_path = config.state_path();
+        tokio::fs::create_dir_all(state_path.parent().unwrap()).await?;
+
+        let state = match tokio::fs::read(&state_path).await {
+            Ok(bytes) => bincode::deserialize(&bytes)?,
+            Err(_) => {
+                let state = NodeState {
+                    identity: identity.id().clone(),
+                    created_at: OffsetDateTime::now_utc().unix_timestamp() as u64,
+                    last_started_at: None,
+                    started: false,
+                    version: 1,
+                    peers: vec![],
+                };
+                let bytes = bincode::serialize(&state)?;
+                tokio::fs::write(&state_path, bytes).await?;
+
+                state
+            }
+        };
         let storage_path = config.storage_path();
         tokio::fs::create_dir_all(&storage_path).await?;
         let storage = Storage::new(storage_path.to_str().unwrap());
@@ -29,7 +54,46 @@ impl Runtime {
             config,
             identity,
             storage,
+            state: RwLock::new(state),
         })
+    }
+
+    pub async fn mark_started(&self) -> anyhow::Result<()> {
+        {
+            let mut state = self.state.write().await;
+
+            state.started = true;
+            state.last_started_at = Some(time::OffsetDateTime::now_utc().unix_timestamp() as u64);
+        }
+        self.save_state().await?;
+
+        Ok(())
+    }
+    pub async fn mark_stopped(&self) -> anyhow::Result<()> {
+        {
+            let mut state = self.state.write().await;
+            state.started = false;
+        }
+        self.save_state().await?;
+
+        Ok(())
+    }
+
+    async fn save_state(&self) -> anyhow::Result<()> {
+        let bytes = {
+            let state = self.state.read().await;
+            bincode::serialize(&*state)?
+        };
+        let path = self.config.state_path();
+        let tmp = path.with_extension("tmp");
+        tokio::fs::write(&tmp, bytes).await?;
+        tokio::fs::rename(tmp, path).await?;
+
+        Ok(())
+    }
+
+    pub async fn status(&self) -> NodeState {
+        self.state.read().await.clone()
     }
 
     pub fn export_path(&self) -> PathBuf {
@@ -62,6 +126,7 @@ impl Runtime {
 
         Ok(id)
     }
+
     pub async fn get(&self, id: &ObjectId) -> anyhow::Result<Object> {
         let object = self.storage.get_verified(id).await?;
 

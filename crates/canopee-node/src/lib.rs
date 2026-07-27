@@ -33,9 +33,9 @@ impl Node {
         }
         let listener = UnixListener::bind(&socket_path)?;
         println!("Canopee node listening on {:?}", socket_path);
-
         let mut shutdown = self.shutdown.subscribe();
         let mut tasks: JoinSet<()> = JoinSet::new();
+        self.runtime.mark_started().await?;
 
         loop {
             tokio::select! {
@@ -66,7 +66,6 @@ impl Node {
             }
         }
         tasks.abort_all();
-
         if socket_path.exists() {
             tokio::fs::remove_file(&socket_path).await?;
         }
@@ -169,9 +168,7 @@ impl Node {
 #[tokio::test]
 async fn test_node_put() {
     let runtime = Runtime::open().await.unwrap();
-
     let node = Node::new(runtime);
-
     let response = node
         .handle(NodeCommand::Put {
             data: b"hello".to_vec(),
