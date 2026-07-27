@@ -1,5 +1,5 @@
 use crate::object_id::ObjectId;
-use crate::{Object, Verify};
+use crate::{Object, ObjectInfo, Verify};
 use anyhow::Result;
 use tokio::fs;
 
@@ -68,13 +68,20 @@ impl Storage {
         Ok(objects)
     }
 
-    pub async fn list_objects(&self) -> Result<Vec<Object>> {
+    pub async fn list_objects(&self) -> Result<Vec<ObjectInfo>> {
         let mut objects = Vec::new();
         let mut entries = fs::read_dir(&self.root).await?;
         while let Some(entry) = entries.next_entry().await? {
             let bytes = fs::read(entry.path()).await?;
             let object = bincode::deserialize::<Object>(&bytes)?;
-            objects.push(object);
+            let verified = object.verify();
+            let object_info = ObjectInfo {
+                id: object.id,
+                owner: object.payload.owner,
+                size: object.payload.metadata.size,
+                verified,
+            };
+            objects.push(object_info);
         }
         Ok(objects)
     }

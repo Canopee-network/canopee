@@ -160,7 +160,7 @@ dependencies = [
  "anyhow",
  "bincode",
  "canopee-identity",
- "canopee-runtime",
+ "canopee-node",
  "canopee-storage",
  "clap",
  "dirs",
@@ -178,6 +178,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "canopee-node"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "canopee-identity",
+ "canopee-runtime",
+ "canopee-storage",
+ "serde",
+ "tokio",
+]
+
+[[package]]
 name = "canopee-runtime"
 version = "0.1.0"
 dependencies = [
@@ -186,6 +198,7 @@ dependencies = [
  "canopee-identity",
  "canopee-storage",
  "dirs",
+ "serde",
  "tokio",
 ]
 

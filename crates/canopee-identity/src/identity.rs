@@ -7,6 +7,12 @@ use tokio::fs;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdentityId(String);
 
+impl ToString for IdentityId {
+    fn to_string(&self) -> String {
+        self.0.clone()
+    }
+}
+
 #[allow(unused)]
 #[derive(Debug)]
 pub struct Identity {

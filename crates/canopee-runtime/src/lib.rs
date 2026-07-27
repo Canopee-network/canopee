@@ -1,6 +1,6 @@
-use canopee_identity::Identity;
-use canopee_storage::{Export, ExportBundle, Object, ObjectId, Storage};
 mod config;
+use canopee_identity::Identity;
+use canopee_storage::{Export, ExportBundle, Object, ObjectId, ObjectInfo, Storage};
 use config::Config;
 use std::path::PathBuf;
 
@@ -33,11 +33,18 @@ impl Runtime {
         })
     }
 
+    pub async fn run(&self) -> anyhow::Result<()> {
+        println!("Canopee node running");
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        }
+    }
+
     pub fn export_path(&self) -> PathBuf {
         self.config.export_path()
     }
 
-    pub async fn export_to_file(&self, id: &ObjectId) -> anyhow::Result<PathBuf> {
+    pub async fn export_to_file(&self, id: &ObjectId) -> anyhow::Result<ExportBundle> {
         let bundle = self.export(id).await?;
         let export_dir = self.config.export_path();
         tokio::fs::create_dir_all(&export_dir).await?;
@@ -45,7 +52,7 @@ impl Runtime {
         let bytes = bincode::serialize(&bundle)?;
         tokio::fs::write(&path, bytes).await?;
 
-        Ok(path)
+        Ok(bundle)
     }
 
     pub fn identity(&self) -> &Identity {
@@ -65,7 +72,7 @@ impl Runtime {
         Ok(object)
     }
 
-    pub async fn list(&self) -> anyhow::Result<Vec<Object>> {
+    pub async fn list(&self) -> anyhow::Result<Vec<ObjectInfo>> {
         self.storage.list_objects().await
     }
 

@@ -15,6 +15,14 @@ pub type Signature = Vec<u8>;
 pub type PublicKeyBytes = Vec<u8>;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ObjectInfo {
+    pub id: ObjectId,
+    pub owner: IdentityId,
+    pub size: u64,
+    pub verified: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ObjectMetadata {
     pub created_at: u64,
     pub size: u64,
