@@ -187,6 +187,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "canopee-network"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "canopee-identity",
+ "canopee-storage",
+ "serde",
+ "tokio",
+]
+
+[[package]]
 name = "canopee-node"
 version = "0.1.0"
 dependencies = [
@@ -232,6 +244,7 @@ dependencies = [
  "canopee-config",
  "canopee-node",
  "canopee-protocol",
+ "serde",
  "tokio",
 ]
 

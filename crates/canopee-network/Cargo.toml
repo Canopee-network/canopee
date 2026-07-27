@@ -1,5 +1,5 @@
 [package]
-name = "canopee-sdk"
+name = "canopee-network"
 version = "0.1.0"
 edition = "2024"
 
@@ -9,6 +9,5 @@ bincode = "1"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 
-canopee-node = { path = "../canopee-node" }
-canopee-protocol = { path = "../canopee-protocol" }
-canopee-config = { path = "../canopee-config" }
+canopee-storage = { path = "../canopee-storage" }
+canopee-identity = { path = "../canopee-identity" }
