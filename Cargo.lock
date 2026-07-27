@@ -159,12 +159,33 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bincode",
+ "canopee-client",
  "canopee-identity",
- "canopee-node",
+ "canopee-protocol",
+ "canopee-runtime",
  "canopee-storage",
  "clap",
  "dirs",
  "tokio",
+]
+
+[[package]]
+name = "canopee-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "canopee-config",
+ "canopee-node",
+ "canopee-protocol",
+ "tokio",
+]
+
+[[package]]
+name = "canopee-config"
+version = "0.1.0"
+dependencies = [
+ "dirs",
 ]
 
 [[package]]
@@ -182,11 +203,22 @@ name = "canopee-node"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bincode",
  "canopee-identity",
+ "canopee-protocol",
  "canopee-runtime",
  "canopee-storage",
  "serde",
  "tokio",
+]
+
+[[package]]
+name = "canopee-protocol"
+version = "0.1.0"
+dependencies = [
+ "canopee-identity",
+ "canopee-storage",
+ "serde",
 ]
 
 [[package]]
@@ -195,9 +227,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bincode",
+ "canopee-config",
  "canopee-identity",
  "canopee-storage",
- "dirs",
  "serde",
  "tokio",
 ]

@@ -7,9 +7,9 @@ use tokio::fs;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdentityId(String);
 
-impl ToString for IdentityId {
-    fn to_string(&self) -> String {
-        self.0.clone()
+impl std::fmt::Display for IdentityId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -40,9 +40,7 @@ impl Identity {
     pub async fn create(path: &str) -> Result<Self> {
         let signing_key = Keypair::generate_ed25519();
         let peer_id = PeerId::from(signing_key.public());
-
         let identity_id = format!("canopee://identity/{}", peer_id);
-
         let bytes = signing_key.to_protobuf_encoding()?;
         fs::write(path, bytes).await?;
 
@@ -55,9 +53,7 @@ impl Identity {
     pub async fn load(path: &str) -> Result<Self> {
         let bytes = fs::read(path).await?;
         let signing_key = Keypair::from_protobuf_encoding(&bytes).expect("invalid keypair file");
-
         let peer_id = PeerId::from(signing_key.public());
-
         let identity_id = format!("canopee://identity/{}", peer_id);
 
         Ok(Self {
@@ -70,9 +66,7 @@ impl Identity {
 #[tokio::test]
 async fn identity_can_sign_and_verify() {
     let identity = Identity::create("./test.key").await.unwrap();
-
     let message = b"hello canopee";
-
     let signature = identity.sign(message).unwrap();
 
     assert!(identity.verify(message, &signature));

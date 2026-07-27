@@ -26,4 +26,14 @@ impl Config {
     pub fn export_path(&self) -> PathBuf {
         self.root.join("exports")
     }
+
+    pub fn node_socket_path(&self) -> PathBuf {
+        self.root.join("node.sock")
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self::new()
+    }
 }

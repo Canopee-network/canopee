@@ -1,4 +1,7 @@
-use canopee_node::{Node, NodeCommand, NodeResponse};
+use canopee_client::NodeClient;
+// use canopee_node::Node;
+use canopee_protocol::{NodeCommand, NodeResponse};
+use canopee_runtime::Runtime;
 use canopee_storage::{ExportBundle, ObjectId};
 use clap::{Parser, Subcommand};
 
@@ -27,23 +30,32 @@ async fn main() {
 
     match cli.command {
         Commands::Init => {
-            let node = Node::open().await.unwrap();
-            let response = node.handle(NodeCommand::Identity).await;
+            let runtime = Runtime::open().await.unwrap();
             println!("Canopee initialized:");
-            println!("{:?}", response);
+            println!("Identity: {:?}", runtime.identity().id());
         }
 
         Commands::Identity => {
-            let node = Node::open().await.unwrap();
-            let identity_id = node.handle(NodeCommand::Identity).await;
-            println!("Identity ID: {:?}", identity_id);
+            let client = NodeClient::new().await.unwrap();
+            let response = client.request(NodeCommand::Identity).await.unwrap();
+
+            match response {
+                NodeResponse::Identity { identity_id } => {
+                    println!("{:?}", identity_id);
+                }
+
+                NodeResponse::Error { message } => {
+                    eprintln!("{}", message);
+                }
+                _ => {}
+            }
         }
 
         Commands::Put { path } => {
-            let node = Node::open().await.unwrap();
             let data = tokio::fs::read(path).await.unwrap();
+            let client = NodeClient::new().await.unwrap();
+            let response = client.request(NodeCommand::Put { data }).await.unwrap();
 
-            let response = node.handle(NodeCommand::Put { data }).await;
             match response {
                 NodeResponse::ObjectCreated { id } => {
                     println!("Created object:");
@@ -58,10 +70,13 @@ async fn main() {
         }
 
         Commands::Get { id } => {
-            let node = Node::open().await.unwrap();
             let object_id = ObjectId::new(&id);
+            let client = NodeClient::new().await.unwrap();
+            let response = client
+                .request(NodeCommand::Get { id: object_id })
+                .await
+                .unwrap();
 
-            let response = node.handle(NodeCommand::Get { id: object_id }).await;
             match response {
                 NodeResponse::Object { object } => {
                     println!("Object:");
@@ -76,9 +91,9 @@ async fn main() {
         }
 
         Commands::List => {
-            let node = Node::open().await.unwrap();
+            let client = NodeClient::new().await.unwrap();
+            let response = client.request(NodeCommand::List).await.unwrap();
 
-            let response = node.handle(NodeCommand::List).await;
             match response {
                 NodeResponse::Objects { objects } => {
                     println!("Canopee Objects:\n");
@@ -106,10 +121,13 @@ async fn main() {
         }
 
         Commands::Export { id } => {
-            let node = Node::open().await.unwrap();
             let object_id = ObjectId::new(&id);
+            let client = NodeClient::new().await.unwrap();
+            let response = client
+                .request(NodeCommand::Export { id: object_id })
+                .await
+                .unwrap();
 
-            let response = node.handle(NodeCommand::Export { id: object_id }).await;
             match response {
                 NodeResponse::Exported { bundle } => {
                     println!("Exported: {:?}", bundle.object.id);
@@ -123,11 +141,14 @@ async fn main() {
         }
 
         Commands::Import { path } => {
-            let node = Node::open().await.unwrap();
             let bytes = tokio::fs::read(path).await.unwrap();
             let bundle: ExportBundle = bincode::deserialize(&bytes).unwrap();
+            let client = NodeClient::new().await.unwrap();
+            let response = client
+                .request(NodeCommand::Import { bundle })
+                .await
+                .unwrap();
 
-            let response = node.handle(NodeCommand::Import { bundle }).await;
             match response {
                 NodeResponse::Imported => {
                     println!("Imported");
@@ -140,11 +161,20 @@ async fn main() {
         }
 
         Commands::Start => {
-            let node = Node::open().await.unwrap();
-            match node.run().await {
-                Ok(_) => println!("Node started."),
-                Err(e) => eprintln!("Error: {}", e),
-            }
+            // let child = tokio::process::Command::new("canopee-node")
+            //     .spawn()
+            //     .unwrap();
+            let child = tokio::process::Command::new("cargo")
+                .args(["run", "-p", "canopee-node"])
+                .spawn()
+                .unwrap();
+
+            println!("Canopee node started (pid {})", child.id().unwrap());
+            // let node = Node::open().await.unwrap();
+            // match node.run().await {
+            //     Ok(_) => println!("Node started."),
+            //     Err(e) => eprintln!("Error: {}", e),
+            // }
         }
     }
 }

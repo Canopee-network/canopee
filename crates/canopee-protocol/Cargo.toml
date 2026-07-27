@@ -1,14 +1,10 @@
 [package]
-name = "canopee-runtime"
+name = "canopee-protocol"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-anyhow = "1"
-bincode = "1"
-tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 
 canopee-identity = { path = "../canopee-identity" }
 canopee-storage = { path = "../canopee-storage" }
-canopee-config = { path = "../canopee-config" }

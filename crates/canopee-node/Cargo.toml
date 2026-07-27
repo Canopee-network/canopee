@@ -5,9 +5,11 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
+bincode = "1"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 
 canopee-identity = { path = "../canopee-identity" }
 canopee-storage = { path = "../canopee-storage" }
 canopee-runtime = { path = "../canopee-runtime" }
+canopee-protocol = { path = "../canopee-protocol" }

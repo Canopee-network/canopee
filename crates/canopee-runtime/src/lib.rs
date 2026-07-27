@@ -1,7 +1,6 @@
-mod config;
+use canopee_config::Config;
 use canopee_identity::Identity;
 use canopee_storage::{Export, ExportBundle, Object, ObjectId, ObjectInfo, Storage};
-use config::Config;
 use std::path::PathBuf;
 
 pub struct Runtime {
@@ -33,15 +32,12 @@ impl Runtime {
         })
     }
 
-    pub async fn run(&self) -> anyhow::Result<()> {
-        println!("Canopee node running");
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-        }
-    }
-
     pub fn export_path(&self) -> PathBuf {
         self.config.export_path()
+    }
+
+    pub fn node_socket_path(&self) -> PathBuf {
+        self.config.node_socket_path()
     }
 
     pub async fn export_to_file(&self, id: &ObjectId) -> anyhow::Result<ExportBundle> {
