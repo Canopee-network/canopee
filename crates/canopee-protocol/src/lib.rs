@@ -11,6 +11,7 @@ pub enum NodeCommand {
     Import { bundle: ExportBundle },
     Status,
     Identity,
+    Shutdown,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -23,4 +24,5 @@ pub enum NodeResponse {
     Status { identity: String, objects: usize },
     Error { message: String },
     Identity { identity_id: IdentityId },
+    ShutdownAccepted,
 }

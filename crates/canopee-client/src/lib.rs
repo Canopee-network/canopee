@@ -38,4 +38,7 @@ impl NodeClient {
 
         Ok(response)
     }
+    pub async fn is_running(&self) -> bool {
+        UnixStream::connect(&self.socket).await.is_ok()
+    }
 }

@@ -1,5 +1,4 @@
 use canopee_client::NodeClient;
-// use canopee_node::Node;
 use canopee_protocol::{NodeCommand, NodeResponse};
 use canopee_runtime::Runtime;
 use canopee_storage::{ExportBundle, ObjectId};
@@ -22,6 +21,8 @@ enum Commands {
     Put { path: String },
     Export { id: String },
     Import { path: String },
+    Status,
+    Stop,
 }
 
 #[tokio::main]
@@ -47,6 +48,51 @@ async fn main() {
                 NodeResponse::Error { message } => {
                     eprintln!("{}", message);
                 }
+                _ => {}
+            }
+        }
+
+        Commands::Status => {
+            let client = NodeClient::new().await.unwrap();
+            let response = client.request(NodeCommand::Status).await.unwrap();
+            match response {
+                NodeResponse::Status { identity, objects } => {
+                    println!("\nCanopee Node");
+                    println!("\nRunning:");
+                    println!("yes"); // placeholder
+                    println!("\nIdentity:");
+                    println!("{}", identity);
+                    println!("\nObjects:");
+                    println!("{}", objects);
+                    println!("\nNetwork:");
+                    println!("offline"); // placeholder
+                }
+                NodeResponse::Error { message } => {
+                    eprintln!("Error: {}", message);
+                }
+                _ => {}
+            }
+        }
+
+        Commands::Stop => {
+            let client = NodeClient::new().await.unwrap();
+
+            // if !client.is_running().await {
+            //     println!("Canopee node is not running");
+            //     return;
+            // }
+
+            let response = client.request(NodeCommand::Shutdown).await.unwrap();
+
+            match response {
+                NodeResponse::ShutdownAccepted => {
+                    println!("Canopee node stopped");
+                }
+
+                NodeResponse::Error { message } => {
+                    eprintln!("{}", message);
+                }
+
                 _ => {}
             }
         }
@@ -161,20 +207,18 @@ async fn main() {
         }
 
         Commands::Start => {
-            // let child = tokio::process::Command::new("canopee-node")
-            //     .spawn()
-            //     .unwrap();
+            // let client = NodeClient::new().await.unwrap();
+            // if client.is_running().await {
+            //     println!("Canopee node already running");
+            //     return;
+            // }
+
             let child = tokio::process::Command::new("cargo")
                 .args(["run", "-p", "canopee-node"])
                 .spawn()
                 .unwrap();
 
             println!("Canopee node started (pid {})", child.id().unwrap());
-            // let node = Node::open().await.unwrap();
-            // match node.run().await {
-            //     Ok(_) => println!("Node started."),
-            //     Err(e) => eprintln!("Error: {}", e),
-            // }
         }
     }
 }

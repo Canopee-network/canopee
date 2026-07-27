@@ -7,6 +7,7 @@ async fn main() -> anyhow::Result<()> {
     println!("Canopee node started");
 
     node.run().await?;
+    println!("Canopee node exited");
 
     Ok(())
 }
