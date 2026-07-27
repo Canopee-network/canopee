@@ -1,0 +1,29 @@
+use std::path::PathBuf;
+
+pub struct Config {
+    root: PathBuf,
+}
+
+impl Config {
+    pub fn new() -> Self {
+        Self {
+            root: dirs::home_dir().unwrap().join(".canopee"),
+        }
+    }
+
+    pub fn home_dir(&self) -> PathBuf {
+        self.root.clone()
+    }
+
+    pub fn identity_path(&self) -> PathBuf {
+        self.root.join("identity")
+    }
+
+    pub fn storage_path(&self) -> PathBuf {
+        self.root.join("storage")
+    }
+
+    pub fn export_path(&self) -> PathBuf {
+        self.root.join("exports")
+    }
+}

@@ -1,0 +1,10 @@
+[package]
+name = "canopee"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+members = ["crates/canopee-cli","crates/canopee-identity", "crates/canopee-runtime", "crates/canopee-storage"]
+resolver = "3"
+
+[dependencies]

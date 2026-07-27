@@ -1,0 +1,15 @@
+[package]
+name = "canopee-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+bincode = "1"
+dirs = "5"
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+
+canopee-identity = { path = "../canopee-identity" }
+canopee-storage = { path = "../canopee-storage" }
+canopee-runtime = { path = "../canopee-runtime" }
