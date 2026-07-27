@@ -1,6 +1,6 @@
-use canopee_client::NodeClient;
 use canopee_protocol::{NodeCommand, NodeResponse};
 use canopee_runtime::Runtime;
+use canopee_sdk::NodeClient;
 use canopee_storage::{ExportBundle, ObjectId};
 use clap::{Parser, Subcommand};
 

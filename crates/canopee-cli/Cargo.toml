@@ -12,6 +12,6 @@ clap = { version = "4", features = ["derive"] }
 
 canopee-identity = { path = "../canopee-identity" }
 canopee-storage = { path = "../canopee-storage" }
-canopee-client = { path = "../canopee-client" }
+canopee-sdk = { path = "../canopee-sdk" }
 canopee-protocol = { path = "../canopee-protocol" }
 canopee-runtime = { path = "../canopee-runtime" }
