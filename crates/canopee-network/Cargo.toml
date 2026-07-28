@@ -8,6 +8,31 @@ anyhow = "1"
 bincode = "1"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
+futures = "0.3"
+tracing = "0.1"
+async-trait = "0.1"
+
+libp2p = { version = "0.54", features = [
+    "tokio",
+    "tcp",
+    "dns",
+    "noise",
+    "yamux",
+    "identify",
+    "kad",
+    "ping",
+    "request-response",
+    "cbor",
+    "macros",
+    "gossipsub",
+    "relay",
+    "dcutr",
+    "autonat",
+    "mdns",
+] }
 
 canopee-storage = { path = "../canopee-storage" }
 canopee-identity = { path = "../canopee-identity" }
+
+[dev-dependencies]
+async-trait = "0.1"

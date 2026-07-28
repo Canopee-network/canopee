@@ -9,6 +9,10 @@ bincode = "1"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 
-canopee-node = { path = "../canopee-node" }
 canopee-protocol = { path = "../canopee-protocol" }
 canopee-config = { path = "../canopee-config" }
+canopee-identity = { path = "../canopee-identity" }
+canopee-storage = { path = "../canopee-storage" }
+
+[dev-dependencies]
+canopee-node = { path = "../canopee-node" }

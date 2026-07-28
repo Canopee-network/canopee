@@ -1,12 +1,19 @@
 use canopee_identity::IdentityId;
-use serde::{Deserialize, Serialize};
-// use std::net::SocketAddr;
+use libp2p::{Multiaddr, PeerId};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Peer {
-    pub identity: IdentityId,
-    pub connected: bool,
-    // pub address: SocketAddr,
-    // pub last_seen: u64,
-    pub protocol_version: u32,
+    pub peer_id: PeerId,
+    pub identity: Option<IdentityId>,
+    pub addresses: Vec<Multiaddr>,
+}
+
+impl Peer {
+    pub fn new(peer_id: PeerId) -> Self {
+        Self {
+            peer_id,
+            identity: None,
+            addresses: Vec::new(),
+        }
+    }
 }

@@ -1,17 +1,32 @@
 mod state;
 use canopee_config::Config;
 use canopee_identity::Identity;
+use canopee_network::{Multiaddr, NetworkManager, ObjectProvider};
 use canopee_storage::{Export, ExportBundle, Object, ObjectId, ObjectInfo, Storage};
 use state::NodeState;
 use std::path::PathBuf;
+use std::sync::Arc;
 use time::OffsetDateTime;
 use tokio::sync::RwLock;
 
 pub struct Runtime {
     pub config: Config,
-    pub identity: Identity,
-    pub storage: Storage,
+    pub identity: Arc<Identity>,
+    pub storage: Arc<Storage>,
+    pub network: NetworkManager,
     state: RwLock<NodeState>,
+}
+
+struct StorageObjectProvider {
+    storage: Arc<Storage>,
+}
+
+#[async_trait::async_trait]
+impl ObjectProvider for StorageObjectProvider {
+    async fn get_object(&self, id: &ObjectId) -> Option<ExportBundle> {
+        let object = self.storage.get_verified(id).await.ok()?;
+        object.export().ok()
+    }
 }
 
 impl Runtime {
@@ -48,12 +63,20 @@ impl Runtime {
         };
         let storage_path = config.storage_path();
         tokio::fs::create_dir_all(&storage_path).await?;
-        let storage = Storage::new(storage_path.to_str().unwrap());
+        let storage = Arc::new(Storage::new(storage_path.to_str().unwrap()));
+        let identity = Arc::new(identity);
+
+        let listen_addr: Multiaddr = config.listen_addr().parse()?;
+        let object_provider = Arc::new(StorageObjectProvider {
+            storage: storage.clone(),
+        });
+        let network = NetworkManager::new(identity.clone(), listen_addr, object_provider)?;
 
         Ok(Self {
             config,
             identity,
             storage,
+            network,
             state: RwLock::new(state),
         })
     }

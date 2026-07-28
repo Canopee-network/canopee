@@ -1,31 +1,20 @@
-use canopee_identity::IdentityId;
 use canopee_storage::{ExportBundle, ObjectId};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize)]
-pub enum NetworkMessage {
-    Hello(Hello),
-    Welcome(Welcome),
-    Ping,
-    Pong,
-    FindObject(ObjectId),
-    HaveObject(ObjectId),
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub enum ObjectRequest {
     GetObject(ObjectId),
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub enum ObjectResponse {
     Object(ExportBundle),
-    AnnounceObject(ObjectId),
+    NotFound,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Hello {
-    pub protocol: u32,
-    pub identity: IdentityId,
-    // pub public_key: Vec<u8>,
-    // pub version: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Welcome {
-    pub protocol: u32,
-    pub accepted: bool,
-    pub identity: IdentityId,
+#[derive(Debug, Clone)]
+pub struct PubSubMessage {
+    pub topic: String,
+    pub source: Option<libp2p::PeerId>,
+    pub data: Vec<u8>,
 }

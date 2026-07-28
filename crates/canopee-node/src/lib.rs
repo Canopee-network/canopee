@@ -98,6 +98,11 @@ impl Node {
 
     async fn handle_connection(&self, mut stream: UnixStream) -> anyhow::Result<()> {
         let command: NodeCommand = self.read_command(&mut stream).await?;
+
+        if let NodeCommand::Subscribe { topic } = command {
+            return self.handle_subscribe(stream, topic).await;
+        }
+
         let should_shutdown = matches!(command, NodeCommand::Shutdown);
         let response = self.handle(command).await;
         if let Err(e) = self.write_response(&mut stream, response).await {
@@ -107,6 +112,49 @@ impl Node {
             println!("Sending shutdown signal");
             let _ = self.shutdown.send(());
         }
+        Ok(())
+    }
+
+    async fn handle_subscribe(&self, mut stream: UnixStream, topic: String) -> anyhow::Result<()> {
+        let mut receiver = match self.runtime.network.subscribe(&topic).await {
+            Ok(receiver) => receiver,
+            Err(e) => {
+                let _ = self
+                    .write_response(
+                        &mut stream,
+                        NodeResponse::Error {
+                            message: e.to_string(),
+                        },
+                    )
+                    .await;
+                return Ok(());
+            }
+        };
+        self.write_response(&mut stream, NodeResponse::Subscribed)
+            .await?;
+
+        let mut shutdown = self.shutdown.subscribe();
+        loop {
+            tokio::select! {
+                message = receiver.recv() => {
+                    let Ok(message) = message else { break };
+                    if message.topic != topic {
+                        continue;
+                    }
+                    let response = NodeResponse::PubSub(canopee_protocol::PubSubMessage {
+                        topic: message.topic,
+                        source: message.source.map(|p| p.to_string()),
+                        data: message.data,
+                    });
+                    if self.write_response(&mut stream, response).await.is_err() {
+                        break;
+                    }
+                }
+                _ = shutdown.recv() => break,
+            }
+        }
+
+        let _ = self.runtime.network.unsubscribe(&topic).await;
         Ok(())
     }
 
@@ -140,9 +188,11 @@ impl Node {
 
             NodeCommand::Status => {
                 let objects = self.runtime.list().await.unwrap_or_default().len();
+                let peers = self.runtime.network.peers().await.unwrap_or_default().len();
                 NodeResponse::Status {
                     identity: self.runtime.identity().id().to_string(),
                     objects,
+                    peers,
                 }
             }
 
@@ -161,6 +211,89 @@ impl Node {
             },
 
             NodeCommand::Shutdown => NodeResponse::ShutdownAccepted,
+
+            NodeCommand::Dial { addr } => match addr.parse() {
+                Ok(addr) => match self.runtime.network.dial(addr).await {
+                    Ok(_) => NodeResponse::Dialed,
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                },
+                Err(e) => NodeResponse::Error {
+                    message: format!("Invalid address: {e}"),
+                },
+            },
+
+            NodeCommand::ListenViaRelay { relay_addr } => match relay_addr.parse() {
+                Ok(relay_addr) => match self.runtime.network.listen_via_relay(relay_addr).await {
+                    Ok(_) => NodeResponse::ListeningViaRelay,
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                },
+                Err(e) => NodeResponse::Error {
+                    message: format!("Invalid address: {e}"),
+                },
+            },
+
+            NodeCommand::Publish { topic, data } => {
+                match self.runtime.network.publish(&topic, data).await {
+                    Ok(_) => NodeResponse::Published,
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+
+            // Intercepted in `handle_connection` before reaching here.
+            NodeCommand::Subscribe { .. } => NodeResponse::Error {
+                message: "Subscribe must be handled as a streaming connection".to_string(),
+            },
+
+            NodeCommand::Peers => match self.runtime.network.peers().await {
+                Ok(peers) => NodeResponse::Peers {
+                    peers: peers
+                        .into_iter()
+                        .map(|peer| canopee_protocol::PeerInfo {
+                            peer_id: peer.peer_id.to_string(),
+                            identity: peer.identity,
+                            addresses: peer.addresses.iter().map(|a| a.to_string()).collect(),
+                        })
+                        .collect(),
+                },
+                Err(e) => NodeResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+
+            NodeCommand::FindProviders { id } => match self.runtime.network.find_providers(id).await
+            {
+                Ok(peer_ids) => NodeResponse::Providers {
+                    peer_ids: peer_ids.iter().map(|p| p.to_string()).collect(),
+                },
+                Err(e) => NodeResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+
+            NodeCommand::FetchObject { peer_id, id } => match peer_id.parse() {
+                Ok(peer_id) => match self.runtime.network.get_object(peer_id, id).await {
+                    Ok(bundle) => NodeResponse::Exported { bundle },
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                },
+                Err(e) => NodeResponse::Error {
+                    message: format!("Invalid peer id: {e}"),
+                },
+            },
+
+            NodeCommand::Announce { id } => match self.runtime.network.announce(id).await {
+                Ok(_) => NodeResponse::Announced,
+                Err(e) => NodeResponse::Error {
+                    message: e.to_string(),
+                },
+            },
         }
     }
 }

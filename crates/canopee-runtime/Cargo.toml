@@ -9,7 +9,9 @@ bincode = "1"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 time = { version = "0.3", features = ["serde"] }
+async-trait = "0.1"
 
 canopee-identity = { path = "../canopee-identity" }
 canopee-storage = { path = "../canopee-storage" }
 canopee-config = { path = "../canopee-config" }
+canopee-network = { path = "../canopee-network" }

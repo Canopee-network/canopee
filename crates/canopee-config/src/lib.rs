@@ -31,6 +31,10 @@ impl Config {
         self.root.join("node.sock")
     }
 
+    pub fn listen_addr(&self) -> String {
+        "/ip4/0.0.0.0/tcp/0".to_string()
+    }
+
     pub fn state_path(&self) -> PathBuf {
         self.home_dir().join("state").join("node.state")
     }

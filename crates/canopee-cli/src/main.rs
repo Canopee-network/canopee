@@ -23,6 +23,9 @@ enum Commands {
     Import { path: String },
     Status,
     Stop,
+    Dial { addr: String },
+    ListenViaRelay { relay_addr: String },
+    Publish { topic: String, message: String },
 }
 
 #[tokio::main]
@@ -56,7 +59,11 @@ async fn main() {
             let client = NodeClient::new().await.unwrap();
             let response = client.request(NodeCommand::Status).await.unwrap();
             match response {
-                NodeResponse::Status { identity, objects } => {
+                NodeResponse::Status {
+                    identity,
+                    objects,
+                    peers,
+                } => {
                     println!("\nCanopee Node");
                     println!("\nRunning:");
                     println!("yes"); // placeholder
@@ -64,8 +71,8 @@ async fn main() {
                     println!("{}", identity);
                     println!("\nObjects:");
                     println!("{}", objects);
-                    println!("\nNetwork:");
-                    println!("offline"); // placeholder
+                    println!("\nPeers:");
+                    println!("{}", peers);
                 }
                 NodeResponse::Error { message } => {
                     eprintln!("Error: {}", message);
@@ -196,6 +203,48 @@ async fn main() {
                 NodeResponse::Error { message } => {
                     eprintln!("Error: {}", message);
                 }
+                _ => {}
+            }
+        }
+
+        Commands::Dial { addr } => {
+            let client = NodeClient::new().await.unwrap();
+            let response = client.request(NodeCommand::Dial { addr }).await.unwrap();
+
+            match response {
+                NodeResponse::Dialed => println!("Dialing..."),
+                NodeResponse::Error { message } => eprintln!("Error: {}", message),
+                _ => {}
+            }
+        }
+
+        Commands::ListenViaRelay { relay_addr } => {
+            let client = NodeClient::new().await.unwrap();
+            let response = client
+                .request(NodeCommand::ListenViaRelay { relay_addr })
+                .await
+                .unwrap();
+
+            match response {
+                NodeResponse::ListeningViaRelay => println!("Requesting relay reservation..."),
+                NodeResponse::Error { message } => eprintln!("Error: {}", message),
+                _ => {}
+            }
+        }
+
+        Commands::Publish { topic, message } => {
+            let client = NodeClient::new().await.unwrap();
+            let response = client
+                .request(NodeCommand::Publish {
+                    topic,
+                    data: message.into_bytes(),
+                })
+                .await
+                .unwrap();
+
+            match response {
+                NodeResponse::Published => println!("Published"),
+                NodeResponse::Error { message } => eprintln!("Error: {}", message),
                 _ => {}
             }
         }

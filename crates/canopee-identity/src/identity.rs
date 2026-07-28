@@ -37,6 +37,10 @@ impl Identity {
         self.signing_key.public().encode_protobuf()
     }
 
+    pub fn keypair(&self) -> Keypair {
+        self.signing_key.clone()
+    }
+
     pub async fn create(path: &str) -> Result<Self> {
         let signing_key = Keypair::generate_ed25519();
         let peer_id = PeerId::from(signing_key.public());
