@@ -22,7 +22,10 @@ canopee import <path>                     # import a .canopee bundle into local 
 
 canopee dial <multiaddr>                  # connect directly to a peer, e.g. /ip4/1.2.3.4/tcp/4001/p2p/<id>
 canopee listen-via-relay <relay-multiaddr> # request a relay circuit reservation (enables hole punching)
+canopee peers                             # list currently connected peers
+canopee relay-status                      # confirm accepted relay reservations + dialable circuit addresses
 canopee publish <topic> <message>         # publish a gossipsub message
+canopee chat <topic>                      # interactive send/receive REPL on a gossipsub topic
 ```
 
 Every command except `init` and `start` talks to an already-running node —
@@ -34,12 +37,12 @@ run `canopee start` (or `cargo run -p canopee-node` directly) first.
 |---|---|
 | `init` | Opens a `Runtime` directly (no node required) just to trigger identity/storage creation and print the identity |
 | `start` | Spawns `cargo run -p canopee-node` as a detached child process |
-| `stop`, `status`, `identity`, `put`, `get`, `list`, `export`, `import`, `dial`, `listen-via-relay`, `publish` | Send one `NodeCommand` to the running node via `canopee_sdk::NodeClient` and print the `NodeResponse` |
+| `stop`, `status`, `identity`, `put`, `get`, `list`, `export`, `import`, `dial`, `listen-via-relay`, `peers`, `relay-status`, `publish` | Send one `NodeCommand` to the running node via `canopee_sdk::NodeClient` and print the `NodeResponse` |
+| `chat` | Uses `canopee_sdk::CanopeeClient` to `subscribe` (printing incoming messages on a background task) and `publish` (from stdin) on the same topic — a small persistent REPL, not a one-shot request/response |
 
-Note there's no `subscribe` command — the SDK's `subscribe` streams
-messages over a persistent connection, which doesn't fit a one-shot CLI
-invocation cleanly. Use [`canopee-sdk::CanopeeClient::subscribe`](../canopee-sdk)
-directly (or the SDK's `examples/app.rs subscribe <topic>`) for that.
+See [`docs/testing-chat-between-peers.md`](../../docs/testing-chat-between-peers.md)
+for a full walkthrough of `chat`, `peers`, and `relay-status` together to
+test two nodes talking to each other, on a LAN or through a relay.
 
 ## Example session
 

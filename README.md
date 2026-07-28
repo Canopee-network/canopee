@@ -14,7 +14,10 @@ communication — without needing to run their own network stack.
 New to P2P networking or NAT/relays/DHTs? Start with
 [`docs/networking-for-beginners.md`](docs/networking-for-beginners.md) — a
 no-prior-knowledge walkthrough of the concepts and how to set up and connect
-nodes.
+nodes. Want to try it hands-on right away? See
+[`docs/testing-chat-between-peers.md`](docs/testing-chat-between-peers.md) for
+a step-by-step walkthrough of chatting between two peers, on the same LAN or
+through a relay.
 
 ## Workspace layout
 

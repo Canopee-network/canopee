@@ -266,6 +266,23 @@ impl Node {
                 },
             },
 
+            NodeCommand::RelayReservations => match self.runtime.network.relay_reservations().await
+            {
+                Ok(reservations) => NodeResponse::RelayReservations {
+                    reservations: reservations
+                        .into_iter()
+                        .map(|r| canopee_protocol::RelayReservationInfo {
+                            relay_peer_id: r.relay_peer_id.to_string(),
+                            renewal: r.renewal,
+                            listen_addrs: r.listen_addrs.iter().map(|a| a.to_string()).collect(),
+                        })
+                        .collect(),
+                },
+                Err(e) => NodeResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+
             NodeCommand::FindProviders { id } => match self.runtime.network.find_providers(id).await
             {
                 Ok(peer_ids) => NodeResponse::Providers {

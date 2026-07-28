@@ -16,6 +16,13 @@ pub struct PeerInfo {
     pub addresses: Vec<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RelayReservationInfo {
+    pub relay_peer_id: String,
+    pub renewal: bool,
+    pub listen_addrs: Vec<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum NodeCommand {
     Put { data: Vec<u8> },
@@ -34,6 +41,7 @@ pub enum NodeCommand {
     /// disconnects. Not a request/response command like the others.
     Subscribe { topic: String },
     Peers,
+    RelayReservations,
     FindProviders { id: ObjectId },
     FetchObject { peer_id: String, id: ObjectId },
     Announce { id: ObjectId },
@@ -62,6 +70,7 @@ pub enum NodeResponse {
     Subscribed,
     PubSub(PubSubMessage),
     Peers { peers: Vec<PeerInfo> },
+    RelayReservations { reservations: Vec<RelayReservationInfo> },
     Providers { peer_ids: Vec<String> },
     Announced,
 }

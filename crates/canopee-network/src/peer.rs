@@ -17,3 +17,25 @@ impl Peer {
         }
     }
 }
+
+/// An accepted circuit reservation on a relay, tracked so callers can confirm
+/// the reservation succeeded (and see the resulting dialable addresses)
+/// before asking others to dial us through it.
+#[derive(Debug, Clone)]
+pub struct RelayReservation {
+    pub relay_peer_id: PeerId,
+    /// Whether the most recent accepted request renewed an existing reservation.
+    pub renewal: bool,
+    /// Dialable `/p2p-circuit` addresses learned via `NewListenAddr` for this relay.
+    pub listen_addrs: Vec<Multiaddr>,
+}
+
+impl RelayReservation {
+    pub fn new(relay_peer_id: PeerId) -> Self {
+        Self {
+            relay_peer_id,
+            renewal: false,
+            listen_addrs: Vec::new(),
+        }
+    }
+}

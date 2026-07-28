@@ -26,6 +26,8 @@ enum Commands {
     Stop,
     Dial { addr: String },
     ListenViaRelay { relay_addr: String },
+    Peers,
+    RelayStatus,
     Publish { topic: String, message: String },
     Chat { topic: String },
 }
@@ -229,6 +231,59 @@ async fn main() {
 
             match response {
                 NodeResponse::ListeningViaRelay => println!("Requesting relay reservation..."),
+                NodeResponse::Error { message } => eprintln!("Error: {}", message),
+                _ => {}
+            }
+        }
+
+        Commands::Peers => {
+            let client = NodeClient::new().await.unwrap();
+            let response = client.request(NodeCommand::Peers).await.unwrap();
+
+            match response {
+                NodeResponse::Peers { peers } => {
+                    if peers.is_empty() {
+                        println!("No connected peers");
+                    }
+                    for peer in peers {
+                        println!("{}", peer.peer_id);
+                        if let Some(identity) = &peer.identity {
+                            println!("  Identity: {:?}", identity);
+                        }
+                        for addr in &peer.addresses {
+                            println!("  Address: {}", addr);
+                        }
+                    }
+                }
+                NodeResponse::Error { message } => eprintln!("Error: {}", message),
+                _ => {}
+            }
+        }
+
+        Commands::RelayStatus => {
+            let client = NodeClient::new().await.unwrap();
+            let response = client
+                .request(NodeCommand::RelayReservations)
+                .await
+                .unwrap();
+
+            match response {
+                NodeResponse::RelayReservations { reservations } => {
+                    if reservations.is_empty() {
+                        println!("No accepted relay reservations yet");
+                    }
+                    for reservation in reservations {
+                        println!("Relay: {}", reservation.relay_peer_id);
+                        println!("  Renewal: {}", reservation.renewal);
+                        if reservation.listen_addrs.is_empty() {
+                            println!("  Listen addresses: (pending)");
+                        } else {
+                            for addr in &reservation.listen_addrs {
+                                println!("  Listen address: {}", addr);
+                            }
+                        }
+                    }
+                }
                 NodeResponse::Error { message } => eprintln!("Error: {}", message),
                 _ => {}
             }

@@ -1,7 +1,7 @@
 use crate::node_client::NodeClient;
 use crate::subscription::Subscription;
 use canopee_identity::IdentityId;
-use canopee_protocol::{NodeCommand, NodeResponse, PeerInfo};
+use canopee_protocol::{NodeCommand, NodeResponse, PeerInfo, RelayReservationInfo};
 use canopee_storage::{ExportBundle, Object, ObjectId, ObjectInfo};
 
 /// Entry point for apps that want to use a Canopee node's identity, storage,
@@ -119,6 +119,17 @@ impl CanopeeClient {
             .await?
         {
             NodeResponse::ListeningViaRelay => Ok(()),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Lists accepted relay circuit reservations. Use this to confirm a
+    /// `listen_via_relay` request actually succeeded (and to get the
+    /// resulting dialable `/p2p-circuit` addresses) before asking others to
+    /// dial you through that relay.
+    pub async fn relay_reservations(&self) -> anyhow::Result<Vec<RelayReservationInfo>> {
+        match self.request(NodeCommand::RelayReservations).await? {
+            NodeResponse::RelayReservations { reservations } => Ok(reservations),
             other => Err(Self::unexpected(other)),
         }
     }

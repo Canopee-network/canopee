@@ -278,6 +278,9 @@ design notes for why every node ships with relay capability built in.
 
 ## Where to go next
 
+- [`testing-chat-between-peers.md`](testing-chat-between-peers.md) — a
+  hands-on walkthrough of chatting between two peers, on the same LAN or
+  through a relay
 - [`canopee-network` README](../crates/canopee-network/README.md) — the
   implementation details behind everything above, for readers comfortable
   with Rust/libp2p

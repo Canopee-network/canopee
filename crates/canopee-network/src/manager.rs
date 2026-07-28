@@ -1,10 +1,11 @@
 use crate::behaviour::{CanopeeBehaviour, CanopeeBehaviourEvent, IDENTIFY_PROTOCOL, KAD_PROTOCOL};
 use crate::message::{ObjectRequest, ObjectResponse, PubSubMessage};
-use crate::peer::Peer;
+use crate::peer::{Peer, RelayReservation};
 use canopee_identity::Identity;
 use canopee_storage::{ExportBundle, ObjectId};
 use futures::StreamExt;
 use libp2p::kad::{self, store::MemoryStore};
+use libp2p::multiaddr::Protocol;
 use libp2p::request_response::{self, ProtocolSupport};
 use libp2p::swarm::SwarmEvent;
 use libp2p::{
@@ -15,6 +16,20 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, oneshot};
+
+/// Extracts the relay's peer id from a `/p2p-circuit` listen address, i.e. one
+/// of the form `.../p2p/<relay-id>/p2p-circuit(/p2p/<our-id>)?`.
+fn relay_peer_id_from_circuit_addr(addr: &Multiaddr) -> Option<PeerId> {
+    let mut last_p2p = None;
+    for protocol in addr.iter() {
+        match protocol {
+            Protocol::P2p(peer_id) => last_p2p = Some(peer_id),
+            Protocol::P2pCircuit => return last_p2p,
+            _ => {}
+        }
+    }
+    None
+}
 
 #[async_trait::async_trait]
 pub trait ObjectProvider: Send + Sync + 'static {
@@ -35,6 +50,7 @@ enum Command {
         reply: oneshot::Sender<anyhow::Result<ExportBundle>>,
     },
     ListPeers(oneshot::Sender<Vec<Peer>>),
+    ListRelayReservations(oneshot::Sender<Vec<RelayReservation>>),
     Subscribe(String, oneshot::Sender<anyhow::Result<()>>),
     Unsubscribe(String),
     Publish {
@@ -186,6 +202,18 @@ impl NetworkManager {
         Ok(rx.await?)
     }
 
+    /// Lists currently accepted relay circuit reservations, including the
+    /// dialable addresses learned for each. Use this to confirm a
+    /// `listen_via_relay` request actually succeeded before telling other
+    /// peers to dial you through that relay.
+    pub async fn relay_reservations(&self) -> anyhow::Result<Vec<RelayReservation>> {
+        let (reply, rx) = oneshot::channel();
+        self.commands
+            .send(Command::ListRelayReservations(reply))
+            .await?;
+        Ok(rx.await?)
+    }
+
     /// Subscribes to a gossipsub topic and returns a receiver for messages on
     /// any subscribed topic. Filter on `PubSubMessage::topic` if subscribed to more than one.
     pub async fn subscribe(&self, topic: &str) -> anyhow::Result<broadcast::Receiver<PubSubMessage>> {
@@ -224,6 +252,7 @@ async fn run_event_loop(
     pubsub: broadcast::Sender<PubSubMessage>,
 ) {
     let mut peers: HashMap<PeerId, Peer> = HashMap::new();
+    let mut relay_reservations: HashMap<PeerId, RelayReservation> = HashMap::new();
     let mut pending_get_providers: HashMap<kad::QueryId, oneshot::Sender<Vec<PeerId>>> =
         HashMap::new();
     let mut pending_get_object: HashMap<
@@ -238,6 +267,7 @@ async fn run_event_loop(
                     event,
                     &mut swarm,
                     &mut peers,
+                    &mut relay_reservations,
                     &mut pending_get_providers,
                     &mut pending_get_object,
                     &object_provider,
@@ -246,7 +276,7 @@ async fn run_event_loop(
             }
             command = commands.recv() => {
                 let Some(command) = command else { break };
-                handle_command(&mut swarm, command, &mut pending_get_providers, &mut pending_get_object, &peers);
+                handle_command(&mut swarm, command, &mut pending_get_providers, &mut pending_get_object, &peers, &relay_reservations);
             }
         }
     }
@@ -261,6 +291,7 @@ fn handle_command(
         oneshot::Sender<anyhow::Result<ExportBundle>>,
     >,
     peers: &HashMap<PeerId, Peer>,
+    relay_reservations: &HashMap<PeerId, RelayReservation>,
 ) {
     match command {
         Command::Dial(addr) => {
@@ -299,6 +330,9 @@ fn handle_command(
         Command::ListPeers(reply) => {
             let _ = reply.send(peers.values().cloned().collect());
         }
+        Command::ListRelayReservations(reply) => {
+            let _ = reply.send(relay_reservations.values().cloned().collect());
+        }
         Command::Subscribe(topic, reply) => {
             let ident_topic = gossipsub::IdentTopic::new(topic);
             let result = swarm
@@ -330,6 +364,7 @@ async fn handle_swarm_event(
     event: SwarmEvent<CanopeeBehaviourEvent>,
     swarm: &mut libp2p::Swarm<CanopeeBehaviour>,
     peers: &mut HashMap<PeerId, Peer>,
+    relay_reservations: &mut HashMap<PeerId, RelayReservation>,
     pending_get_providers: &mut HashMap<kad::QueryId, oneshot::Sender<Vec<PeerId>>>,
     pending_get_object: &mut HashMap<
         request_response::OutboundRequestId,
@@ -370,6 +405,75 @@ async fn handle_swarm_event(
             let peer = peers.entry(peer_id).or_insert_with(|| Peer::new(peer_id));
             peer.addresses = info.listen_addrs;
         }
+        SwarmEvent::Behaviour(CanopeeBehaviourEvent::RelayClient(
+            relay::client::Event::ReservationReqAccepted {
+                relay_peer_id,
+                renewal,
+                ..
+            },
+        )) => {
+            let reservation = relay_reservations
+                .entry(relay_peer_id)
+                .or_insert_with(|| RelayReservation::new(relay_peer_id));
+            reservation.renewal = renewal;
+            tracing::info!("Relay reservation accepted via {relay_peer_id} (renewal: {renewal})");
+        }
+        SwarmEvent::NewListenAddr { address, .. } => {
+            if let Some(relay_peer_id) = relay_peer_id_from_circuit_addr(&address) {
+                let reservation = relay_reservations
+                    .entry(relay_peer_id)
+                    .or_insert_with(|| RelayReservation::new(relay_peer_id));
+                if !reservation.listen_addrs.contains(&address) {
+                    reservation.listen_addrs.push(address);
+                }
+            }
+        }
+        SwarmEvent::Behaviour(CanopeeBehaviourEvent::Relay(relay_event)) => match relay_event {
+            relay::Event::ReservationReqAccepted {
+                src_peer_id,
+                renewed,
+            } => {
+                tracing::info!(
+                    "Relay: peer {src_peer_id} is now listening through us (renewed: {renewed})"
+                );
+            }
+            relay::Event::ReservationReqDenied { src_peer_id } => {
+                tracing::warn!("Relay: denied listen reservation for peer {src_peer_id}");
+            }
+            relay::Event::ReservationTimedOut { src_peer_id } => {
+                tracing::info!("Relay: listen reservation for peer {src_peer_id} timed out");
+            }
+            relay::Event::CircuitReqAccepted {
+                src_peer_id,
+                dst_peer_id,
+            } => {
+                tracing::info!(
+                    "Relay: peer {src_peer_id} dialed peer {dst_peer_id} through us"
+                );
+            }
+            relay::Event::CircuitReqDenied {
+                src_peer_id,
+                dst_peer_id,
+            } => {
+                tracing::warn!(
+                    "Relay: denied circuit request from {src_peer_id} to {dst_peer_id}"
+                );
+            }
+            relay::Event::CircuitClosed {
+                src_peer_id,
+                dst_peer_id,
+                error,
+            } => {
+                if let Some(error) = error {
+                    tracing::info!(
+                        "Relay: circuit from {src_peer_id} to {dst_peer_id} closed with error: {error}"
+                    );
+                } else {
+                    tracing::info!("Relay: circuit from {src_peer_id} to {dst_peer_id} closed");
+                }
+            }
+            _ => {}
+        },
         SwarmEvent::Behaviour(CanopeeBehaviourEvent::Autonat(
             autonat::Event::StatusChanged { old, new },
         )) => {
