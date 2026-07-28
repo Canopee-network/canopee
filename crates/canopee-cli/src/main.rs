@@ -1,8 +1,9 @@
 use canopee_protocol::{NodeCommand, NodeResponse};
 use canopee_runtime::Runtime;
-use canopee_sdk::NodeClient;
+use canopee_sdk::{CanopeeClient, NodeClient};
 use canopee_storage::{ExportBundle, ObjectId};
 use clap::{Parser, Subcommand};
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 #[derive(Parser)]
 #[command(name = "canopee")]
@@ -26,6 +27,7 @@ enum Commands {
     Dial { addr: String },
     ListenViaRelay { relay_addr: String },
     Publish { topic: String, message: String },
+    Chat { topic: String },
 }
 
 #[tokio::main]
@@ -246,6 +248,31 @@ async fn main() {
                 NodeResponse::Published => println!("Published"),
                 NodeResponse::Error { message } => eprintln!("Error: {}", message),
                 _ => {}
+            }
+        }
+
+        Commands::Chat { topic } => {
+            let client = CanopeeClient::connect().await.unwrap();
+            let mut subscription = client.subscribe(topic.clone()).await.unwrap();
+
+            tokio::spawn(async move {
+                while let Ok(Some(message)) = subscription.next().await {
+                    let text = String::from_utf8_lossy(&message.data);
+                    let from = message.source.as_deref().unwrap_or("unknown");
+                    println!("{from}: {text}");
+                }
+                println!("Subscription closed");
+            });
+
+            println!("Chatting on topic '{topic}'. Type a message and press enter to send.");
+            let mut lines = BufReader::new(tokio::io::stdin()).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if line.is_empty() {
+                    continue;
+                }
+                if let Err(e) = client.publish(topic.clone(), line.into_bytes()).await {
+                    eprintln!("Error: {}", e);
+                }
             }
         }
 
