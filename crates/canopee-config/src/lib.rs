@@ -32,7 +32,8 @@ impl Config {
     }
 
     pub fn listen_addr(&self) -> String {
-        "/ip4/0.0.0.0/tcp/0".to_string()
+        let port = std::env::var("CANOPEE_LISTEN_PORT").unwrap_or_else(|_| "0".to_string());
+        format!("/ip4/0.0.0.0/tcp/{port}")
     }
 
     pub fn state_path(&self) -> PathBuf {

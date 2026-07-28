@@ -1,0 +1,14 @@
+[Unit]
+Description=Canopee relay node
+After=network.target
+
+[Service]
+Type=simple
+User=canopee
+Environment=CANOPEE_LISTEN_PORT=4001
+ExecStart=/home/canopee/canopee/target/release/canopee-node
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
