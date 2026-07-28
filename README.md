@@ -11,6 +11,11 @@ node (through [`canopee-sdk`](crates/canopee-sdk)) to store data, discover
 and fetch objects from peers, and publish/subscribe to topics for real-time
 communication — without needing to run their own network stack.
 
+New to P2P networking or NAT/relays/DHTs? Start with
+[`docs/networking-for-beginners.md`](docs/networking-for-beginners.md) — a
+no-prior-knowledge walkthrough of the concepts and how to set up and connect
+nodes.
+
 ## Workspace layout
 
 Canopee is a Cargo workspace. Each crate has its own README with full details;
