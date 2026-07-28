@@ -23,21 +23,21 @@ this is the map of how they fit together.
 
 ```
                           ┌────────────────┐
-                          │  canopee-cli    │  binary: `canopee`
-                          │  canopee-node   │  binary: `canopee-node`
+                          │  canopee-cli   │  binary: `canopee`
+                          │  canopee-node  │  binary: `canopee-node`
                           └───────┬────────┘
                                   │ owns
-                          ┌───────▼────────┐
+                          ┌───────▼─────────┐
                           │ canopee-runtime │  ties identity + storage + network together
-                          └───┬───────┬────┘
+                          └───┬───────┬─────┘
                  ┌────────────┘       └───────────┐
-        ┌────────▼───────┐                ┌───────▼────────┐
-        │ canopee-storage │                │ canopee-network │  libp2p swarm
-        └────────┬───────┘                └───────┬────────┘
-                  │                                 │
-          ┌───────▼────────┐                        │
-          │ canopee-identity│◄───────────────────────┘
-          └────────────────┘
+        ┌────────▼────────┐               ┌───────▼─────────┐
+        │ canopee-storage │               │ canopee-network │  libp2p swarm
+        └────────┬────────┘               └───────┬─────────┘
+                  │                               │
+          ┌───────▼──────────┐                    │
+          │ canopee-identity │◄───────────────────┘
+          └──────────────────┘
 
      canopee-protocol   wire format between node and clients (SDK/CLI)
      canopee-config     shared filesystem paths (~/.canopee/...)
