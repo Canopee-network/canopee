@@ -1,6 +1,6 @@
 use canopee_identity::Identity;
 use canopee_network::{Multiaddr, NetworkManager, ObjectProvider};
-use canopee_storage::{Export, ExportBundle, Object, ObjectId};
+use canopee_storage::{Export, ExportBundle, Object, ObjectId, ObjectType};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -25,15 +25,22 @@ impl ObjectProvider for InMemoryObjects {
 
 #[tokio::test]
 async fn two_nodes_dial_and_discover_via_kad() {
-    let identity_a = Arc::new(Identity::create("/tmp/canopee_net_test/a.key").await.unwrap());
-    let identity_b = Arc::new(Identity::create("/tmp/canopee_net_test/b.key").await.unwrap());
+    let identity_a = Arc::new(
+        Identity::create("/tmp/canopee_net_test/a.key")
+            .await
+            .unwrap(),
+    );
+    let identity_b = Arc::new(
+        Identity::create("/tmp/canopee_net_test/b.key")
+            .await
+            .unwrap(),
+    );
 
     let addr_a: Multiaddr = "/ip4/127.0.0.1/tcp/38111".parse().unwrap();
     let addr_b: Multiaddr = "/ip4/127.0.0.1/tcp/38112".parse().unwrap();
 
     let manager_a = NetworkManager::new(identity_a, addr_a.clone(), Arc::new(NoObjects)).unwrap();
-    let _manager_b =
-        NetworkManager::new(identity_b, addr_b.clone(), Arc::new(NoObjects)).unwrap();
+    let _manager_b = NetworkManager::new(identity_b, addr_b.clone(), Arc::new(NoObjects)).unwrap();
 
     manager_a.dial(addr_b).await.unwrap();
 
@@ -59,7 +66,7 @@ async fn node_fetches_object_announced_by_peer() {
     let addr_a: Multiaddr = "/ip4/127.0.0.1/tcp/38113".parse().unwrap();
     let addr_b: Multiaddr = "/ip4/127.0.0.1/tcp/38114".parse().unwrap();
 
-    let object = Object::new(&identity_b, b"hello canopee".to_vec());
+    let object = Object::new(&identity_b, b"hello canopee".to_vec(), ObjectType::Blob);
     let object_id = object.id.clone();
     let bundle = object.export().unwrap();
 

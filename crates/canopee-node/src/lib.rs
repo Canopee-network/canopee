@@ -283,15 +283,16 @@ impl Node {
                 },
             },
 
-            NodeCommand::FindProviders { id } => match self.runtime.network.find_providers(id).await
-            {
-                Ok(peer_ids) => NodeResponse::Providers {
-                    peer_ids: peer_ids.iter().map(|p| p.to_string()).collect(),
-                },
-                Err(e) => NodeResponse::Error {
-                    message: e.to_string(),
-                },
-            },
+            NodeCommand::FindProviders { id } => {
+                match self.runtime.network.find_providers(id).await {
+                    Ok(peer_ids) => NodeResponse::Providers {
+                        peer_ids: peer_ids.iter().map(|p| p.to_string()).collect(),
+                    },
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
 
             NodeCommand::FetchObject { peer_id, id } => match peer_id.parse() {
                 Ok(peer_id) => match self.runtime.network.get_object(peer_id, id).await {
@@ -311,6 +312,14 @@ impl Node {
                     message: e.to_string(),
                 },
             },
+            NodeCommand::PutObject { data, object_type } => {
+                match self.runtime.put_object(data, object_type).await {
+                    Ok(object) => NodeResponse::ObjectCreated { id: object.id },
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
         }
     }
 }

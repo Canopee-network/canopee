@@ -2,7 +2,7 @@ mod state;
 use canopee_config::Config;
 use canopee_identity::Identity;
 use canopee_network::{Multiaddr, NetworkManager, ObjectProvider};
-use canopee_storage::{Export, ExportBundle, Object, ObjectId, ObjectInfo, Storage};
+use canopee_storage::{Export, ExportBundle, Object, ObjectId, ObjectInfo, ObjectType, Storage};
 use state::NodeState;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -143,11 +143,23 @@ impl Runtime {
     }
 
     pub async fn put(&self, data: Vec<u8>) -> anyhow::Result<ObjectId> {
-        let object = Object::new(&self.identity, data);
+        let object = Object::new(&self.identity, data, ObjectType::Blob);
         let id = object.id.clone();
         self.storage.put_verified(&object).await?;
 
         Ok(id)
+    }
+
+    pub async fn put_object(
+        &self,
+        data: Vec<u8>,
+        object_type: ObjectType,
+    ) -> anyhow::Result<Object> {
+        let object = Object::new(&self.identity(), data, object_type);
+
+        self.storage.put_verified(&object).await?;
+
+        Ok(object)
     }
 
     pub async fn get(&self, id: &ObjectId) -> anyhow::Result<Object> {

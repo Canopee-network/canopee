@@ -2,8 +2,7 @@ use crate::node_client::NodeClient;
 use crate::subscription::Subscription;
 use canopee_identity::IdentityId;
 use canopee_protocol::{NodeCommand, NodeResponse, PeerInfo, RelayReservationInfo};
-use canopee_storage::{ExportBundle, Object, ObjectId, ObjectInfo};
-
+use canopee_storage::{ExportBundle, Object, ObjectId, ObjectInfo, ObjectType};
 /// Entry point for apps that want to use a Canopee node's identity, storage,
 /// and network capabilities. Talks to the locally running node over its Unix
 /// socket; the node itself owns the identity keys, object storage, and the
@@ -51,6 +50,35 @@ impl CanopeeClient {
         match self.request(NodeCommand::Put { data }).await? {
             NodeResponse::ObjectCreated { id } => Ok(id),
             other => Err(Self::unexpected(other)),
+        }
+    }
+
+    pub async fn put_object(
+        &self,
+        data: Vec<u8>,
+        object_type: ObjectType,
+    ) -> anyhow::Result<ObjectId> {
+        match self
+            .request(NodeCommand::PutObject { data, object_type })
+            .await?
+        {
+            NodeResponse::ObjectCreated { id } => Ok(id),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    pub async fn put_file(&self, data: Vec<u8>) -> anyhow::Result<ObjectId> {
+        // let data = tokio::fs::read(path).await?;
+        let response = self
+            .request(NodeCommand::PutObject {
+                data,
+                object_type: ObjectType::Blob,
+            })
+            .await?;
+        match response {
+            NodeResponse::ObjectCreated { id } => Ok(id),
+            NodeResponse::Error { message } => Err(anyhow::anyhow!(message)),
+            _ => Err(anyhow::anyhow!("unexpected response")),
         }
     }
 

@@ -1,9 +1,12 @@
 use canopee_protocol::{NodeCommand, NodeResponse};
 use canopee_runtime::Runtime;
 use canopee_sdk::{CanopeeClient, NodeClient};
-use canopee_storage::{ExportBundle, ObjectId};
+use canopee_storage::{ExportBundle, ObjectId, ObjectType};
 use clap::{Parser, Subcommand};
 use tokio::io::{AsyncBufReadExt, BufReader};
+mod app;
+use app::{AppManifest, publish_directory};
+use std::path::Path;
 
 #[derive(Parser)]
 #[command(name = "canopee")]
@@ -18,18 +21,43 @@ enum Commands {
     Identity,
     List,
     Start,
-    Get { id: String },
-    Put { path: String },
-    Export { id: String },
-    Import { path: String },
+    Get {
+        id: String,
+    },
+    Put {
+        path: String,
+    },
+    Export {
+        id: String,
+    },
+    Import {
+        path: String,
+    },
     Status,
     Stop,
-    Dial { addr: String },
-    ListenViaRelay { relay_addr: String },
+    Dial {
+        addr: String,
+    },
+    ListenViaRelay {
+        relay_addr: String,
+    },
     Peers,
     RelayStatus,
-    Publish { topic: String, message: String },
-    Chat { topic: String },
+    Publish {
+        topic: String,
+        message: String,
+    },
+    Chat {
+        topic: String,
+    },
+    //canopee-cli app-manifest ./portfolio --name alice-portfolio
+    AppManifest {
+        directory_path: String,
+        name: String,
+    },
+    AppInfo {
+        id: String,
+    },
 }
 
 #[tokio::main]
@@ -338,6 +366,55 @@ async fn main() {
                 .unwrap();
 
             println!("Canopee node started (pid {})", child.id().unwrap());
+        }
+
+        Commands::AppManifest {
+            directory_path,
+            name,
+        } => {
+            let client = CanopeeClient::connect().await.unwrap();
+            let (entrypoint, assets) = publish_directory(&client, Path::new(&directory_path))
+                .await
+                .unwrap();
+            let identity = client.identity().await.unwrap();
+            let manifest = AppManifest {
+                name,
+                owner: identity,
+                entrypoint,
+                assets,
+            };
+            let bytes = bincode::serialize(&manifest).unwrap();
+            let object_id = client
+                .put_object(bytes, ObjectType::AppManifest)
+                .await
+                .unwrap();
+
+            println!();
+            println!("Application published:");
+            println!("{}", object_id);
+        }
+
+        Commands::AppInfo { id } => {
+            let object_id = ObjectId::new(&id);
+            let client = NodeClient::new().await.unwrap();
+            let response = client
+                .request(NodeCommand::Get { id: object_id })
+                .await
+                .unwrap();
+
+            match response {
+                NodeResponse::Object { object } => {
+                    let manifest: AppManifest = object.decode().unwrap();
+
+                    println!("Manifest:");
+                    println!("{:#?}", manifest);
+                }
+
+                NodeResponse::Error { message } => {
+                    eprintln!("Error: {}", message);
+                }
+                _ => {}
+            }
         }
     }
 }

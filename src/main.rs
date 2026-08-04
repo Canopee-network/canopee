@@ -19,4 +19,26 @@ fn main() {
     // Both peers, chat:
     // cargo run -p canopee-cli -- chat general
     // Type a line and hit enter to send; incoming messages from the other peer print as <peer-id>: <message>.
+    //
+    //
+    //
+    //************************************************************************************************
+    //
+    //
+    // Peer A:
+    // cargo run -p canopee-node
+    // cargo run -p canopee-cli -- identity
+    // cargo run -p canopee-cli -- listen-via-relay /ip4/<vps-ip>/tcp/4001/p2p/<relay-peer-id>
+    //
+    // Peer B:
+    // cargo run -p canopee-node
+    // cargo run -p canopee-cli -- identity
+    // cargo run -p canopee-cli -- listen-via-relay /ip4/<vps-ip>/tcp/4001/p2p/<relay-peer-id>
+    // cargo run -p canopee-cli -- dial /ip4/<vps-ip>/tcp/4001/p2p/<relay-peer-id>/p2p-circuit/p2p/<peer-A-id>
+    //
+    // Peer A:
+    // cargo run -p canopee-cli -- chat general
+    //
+    // Peer B:
+    // cargo run -p canopee-cli -- chat general
 }

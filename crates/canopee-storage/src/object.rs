@@ -2,7 +2,8 @@ use crate::export_bundle::ExportBundle;
 use crate::object_id::ObjectId;
 use canopee_identity::{Identity, IdentityId};
 use libp2p::identity::PublicKey;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use std::collections::HashMap;
 use time::OffsetDateTime;
 
 /*          |--- ObjectMetadata
@@ -14,12 +15,29 @@ use time::OffsetDateTime;
 pub type Signature = Vec<u8>;
 pub type PublicKeyBytes = Vec<u8>;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppManifest {
+    pub name: String,
+    pub owner: IdentityId,
+    pub entrypoint: ObjectId,
+    pub assets: HashMap<String, ObjectId>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ObjectInfo {
     pub id: ObjectId,
     pub owner: IdentityId,
     pub size: u64,
     pub verified: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectType {
+    Blob,
+    AppManifest,
+    // Profile,
+    // Message,
+    // ...
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -33,6 +51,7 @@ pub struct ObjectMetadata {
 pub struct ObjectPayload {
     pub owner: IdentityId,
     pub metadata: ObjectMetadata,
+    pub object_type: ObjectType,
     pub data: Vec<u8>,
 }
 
@@ -45,7 +64,7 @@ pub struct Object {
 }
 
 impl Object {
-    pub fn new(identity: &Identity, bytes: Vec<u8>) -> Self {
+    pub fn new(identity: &Identity, bytes: Vec<u8>, object_type: ObjectType) -> Self {
         let metadata = ObjectMetadata {
             created_at: OffsetDateTime::now_utc().unix_timestamp() as u64,
             size: bytes.len() as u64,
@@ -53,9 +72,11 @@ impl Object {
         };
         let payload = ObjectPayload {
             owner: identity.id().clone(),
-            metadata,
             data: bytes,
+            object_type,
+            metadata,
         };
+
         let id = ObjectId::from_payload(&payload);
         let encoded = bincode::serialize(&payload).unwrap();
         let signature = identity.sign(&encoded).unwrap();
@@ -67,6 +88,23 @@ impl Object {
             signature,
         }
     }
+    pub fn blob(identity: &Identity, bytes: Vec<u8>) -> Self {
+        Self::new(identity, bytes, ObjectType::Blob)
+    }
+
+    pub fn app_manifest(identity: &Identity, manifest: &AppManifest) -> anyhow::Result<Self> {
+        let bytes = bincode::serialize(manifest)?;
+        Ok(Self::new(identity, bytes, ObjectType::AppManifest))
+    }
+
+    pub fn decode<T: DeserializeOwned>(&self) -> anyhow::Result<T> {
+        Ok(bincode::deserialize(&self.payload.data)?)
+    }
+
+    pub fn object_type(&self) -> ObjectType {
+        self.payload.object_type
+    }
+
     pub fn verify_id(&self) -> bool {
         let calculated = ObjectId::from_payload(&self.payload);
         calculated == self.id

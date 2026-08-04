@@ -1,5 +1,5 @@
 use canopee_identity::IdentityId;
-use canopee_storage::{ExportBundle, Object, ObjectId, ObjectInfo};
+use canopee_storage::{ExportBundle, Object, ObjectId, ObjectInfo, ObjectType};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -25,42 +25,82 @@ pub struct RelayReservationInfo {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum NodeCommand {
-    Put { data: Vec<u8> },
-    Get { id: ObjectId },
+    Put {
+        data: Vec<u8>,
+    },
+    PutObject {
+        data: Vec<u8>,
+        object_type: ObjectType,
+    },
+    Get {
+        id: ObjectId,
+    },
     List,
-    Export { id: ObjectId },
-    Import { bundle: ExportBundle },
+    Export {
+        id: ObjectId,
+    },
+    Import {
+        bundle: ExportBundle,
+    },
     Status,
     Identity,
     Shutdown,
-    Dial { addr: String },
-    ListenViaRelay { relay_addr: String },
-    Publish { topic: String, data: Vec<u8> },
+    Dial {
+        addr: String,
+    },
+    ListenViaRelay {
+        relay_addr: String,
+    },
+    Publish {
+        topic: String,
+        data: Vec<u8>,
+    },
     /// Hijacks the connection: after `Subscribed` is sent, the node keeps
     /// pushing `PubSubMessage` frames on this same stream until the client
     /// disconnects. Not a request/response command like the others.
-    Subscribe { topic: String },
+    Subscribe {
+        topic: String,
+    },
     Peers,
     RelayReservations,
-    FindProviders { id: ObjectId },
-    FetchObject { peer_id: String, id: ObjectId },
-    Announce { id: ObjectId },
+    FindProviders {
+        id: ObjectId,
+    },
+    FetchObject {
+        peer_id: String,
+        id: ObjectId,
+    },
+    Announce {
+        id: ObjectId,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum NodeResponse {
-    ObjectCreated { id: ObjectId },
-    Object { object: Object },
-    Objects { objects: Vec<ObjectInfo> },
-    Exported { bundle: ExportBundle },
+    ObjectCreated {
+        id: ObjectId,
+    },
+    Object {
+        object: Object,
+    },
+    Objects {
+        objects: Vec<ObjectInfo>,
+    },
+    Exported {
+        bundle: ExportBundle,
+    },
     Imported,
     Status {
         identity: String,
         objects: usize,
         peers: usize,
     },
-    Error { message: String },
-    Identity { identity_id: IdentityId },
+    Error {
+        message: String,
+    },
+    Identity {
+        identity_id: IdentityId,
+    },
     ShutdownAccepted,
     Dialed,
     ListeningViaRelay,
@@ -69,8 +109,14 @@ pub enum NodeResponse {
     /// the same connection is a `PubSub(PubSubMessage)` until disconnect.
     Subscribed,
     PubSub(PubSubMessage),
-    Peers { peers: Vec<PeerInfo> },
-    RelayReservations { reservations: Vec<RelayReservationInfo> },
-    Providers { peer_ids: Vec<String> },
+    Peers {
+        peers: Vec<PeerInfo>,
+    },
+    RelayReservations {
+        reservations: Vec<RelayReservationInfo>,
+    },
+    Providers {
+        peer_ids: Vec<String>,
+    },
     Announced,
 }
