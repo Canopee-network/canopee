@@ -159,6 +159,13 @@ So "setting up a relay" in practice means: rent a small cloud server, run
 `canopee-node` on it with a **fixed port** (see next section), open that
 port in the firewall, and share its multiaddr with whoever needs it.
 
+Today, "share its multiaddr" means literally sending someone the string —
+there's no list of known public relays a new node can dial automatically.
+See [`bootstrap-nodes-tutorial.md`](bootstrap-nodes-tutorial.md) for a
+guided walkthrough of building exactly that: a small built-in (and
+user-overridable) list of bootstrap addresses so a fresh node can find its
+first peer without a human pasting one in.
+
 > **Current limitation:** out of the box, a node's listen address is
 > `/ip4/0.0.0.0/tcp/0` — port `0` means "the OS picks a random free port,"
 > which changes every restart. For a relay you want a fixed port so its

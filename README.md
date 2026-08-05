@@ -24,7 +24,10 @@ fetching, and serving app manifests. Want to go further and make published
 apps survive the original publisher going offline? See
 [`docs/p2p-app-caching-tutorial.md`](docs/p2p-app-caching-tutorial.md) — a
 step-by-step, learn-by-doing guide (no code given) to implementing
-fetch-and-reannounce caching yourself.
+fetch-and-reannounce caching yourself. Wondering how a brand-new node finds
+its first peer at all, without a human pasting a multiaddr? See
+[`docs/bootstrap-nodes-tutorial.md`](docs/bootstrap-nodes-tutorial.md) for a
+learn-by-doing guide to community/public bootstrap relay lists.
 
 ## Workspace layout
 
