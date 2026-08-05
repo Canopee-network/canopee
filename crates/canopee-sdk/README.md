@@ -11,6 +11,12 @@ depends on — it never needs [`canopee-network`](../canopee-network) or
 canopee-sdk = { path = "../canopee-sdk" } # or a registry/git dependency once published
 ```
 
+If you're trying to publish a static site/SPA rather than build a program
+that talks to the network itself, you don't need this crate at all — see
+[`docs/app-manifests.md`](../../docs/app-manifests.md) and
+[`docs/publishing-vs-building-apps.md`](../../docs/publishing-vs-building-apps.md)
+for the distinction.
+
 ## Quick start
 
 ```rust

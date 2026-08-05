@@ -10,6 +10,12 @@ stable name across republishes.
 If you're not familiar with objects, identities, or the DHT yet, read
 [`networking-for-beginners.md`](networking-for-beginners.md) first.
 
+This is one of two distinct things Canopee calls "apps" — a manifest is
+static content Canopee hosts, not a program that talks back to the
+network. See [`publishing-vs-building-apps.md`](publishing-vs-building-apps.md)
+if you're trying to decide between this and building directly on
+[`canopee-sdk`](../crates/canopee-sdk/README.md).
+
 ## What's actually in a manifest
 
 `AppManifest` ([`canopee-storage/src/object.rs`](../crates/canopee-storage/src/object.rs))
@@ -297,3 +303,11 @@ shared out of band.
   See [`p2p-app-caching-tutorial.md`](p2p-app-caching-tutorial.md) for a
   guided walkthrough of building fetch-and-reannounce caching so apps
   survive their publisher going offline.
+- `serve` does an exact path match against the published `assets` map, with
+  no fallback for unknown paths beyond a `404`. This is fine for a
+  hand-written static page, but a single-page app (React Router, etc.)
+  needs unknown routes to fall back to `index.html` for direct links and
+  refreshes to work — and `guess_content_type` doesn't yet cover fonts,
+  icons, or other common bundler output. See
+  [`spa-hosting-tutorial.md`](spa-hosting-tutorial.md) for a guided
+  walkthrough of publishing a real React/Vite build correctly.

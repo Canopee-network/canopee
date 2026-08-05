@@ -20,14 +20,20 @@ a step-by-step walkthrough of chatting between two peers, on the same LAN or
 through a relay. Want to publish and open a small static app (e.g. a
 portfolio site) peer-to-peer? See
 [`docs/app-manifests.md`](docs/app-manifests.md) for publishing, announcing,
-fetching, and serving app manifests. Want to go further and make published
+fetching, and serving app manifests. Not sure whether you want that or a
+full `canopee-sdk` app — they're not the same thing? See
+[`docs/publishing-vs-building-apps.md`](docs/publishing-vs-building-apps.md)
+for the distinction. Want to go further and make published
 apps survive the original publisher going offline? See
 [`docs/p2p-app-caching-tutorial.md`](docs/p2p-app-caching-tutorial.md) — a
 step-by-step, learn-by-doing guide (no code given) to implementing
 fetch-and-reannounce caching yourself. Wondering how a brand-new node finds
 its first peer at all, without a human pasting a multiaddr? See
 [`docs/bootstrap-nodes-tutorial.md`](docs/bootstrap-nodes-tutorial.md) for a
-learn-by-doing guide to community/public bootstrap relay lists.
+learn-by-doing guide to community/public bootstrap relay lists. Publishing
+a real React/Vite build rather than a hand-written page? See
+[`docs/spa-hosting-tutorial.md`](docs/spa-hosting-tutorial.md) for a
+learn-by-doing guide to SPA client-side routing and MIME type coverage.
 
 ## Workspace layout
 
