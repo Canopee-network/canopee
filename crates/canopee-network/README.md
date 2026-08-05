@@ -60,6 +60,29 @@ automatically; every successful connection and every `identify` exchange
 feeds addresses into Kademlia's routing table, so wide-area lookups
 (`find_providers`) work as soon as the swarm has any path into the DHT.
 
+### Mutable records
+
+`announce`/`find_providers` answer "who has this content-addressed object,"
+which only works because the object's id already encodes its content.
+`put_record`/`get_record` are the lower-level primitive underneath that:
+arbitrary key/value pairs stored directly in Kademlia (not provider
+records), for data that needs to change in place at a stable key —
+[`canopee-storage::AppPointerRecord`](../canopee-storage) is the one
+consumer today, letting an app's `(owner, name)` resolve to its latest
+manifest id even after republishing.
+
+```rust
+network.put_record(key, value).await?;         // overwrites whatever was at `key`, DHT-wide
+let value = network.get_record(key).await?;     // None if nothing's been published at `key`
+```
+
+Unlike `announce`, which just flags this node as *a* provider of an
+existing id, `put_record` replaces the value stored at `key` outright — so
+whoever calls it needs to make sure `key` is something they're allowed to
+overwrite (e.g. derived from their own identity) and that `value` is
+self-verifying (e.g. signed), since `NetworkManager` itself does no
+validation of what's written or read.
+
 ### Pub/sub
 
 ```rust
@@ -106,6 +129,16 @@ to a direct connection in the background; nothing further needs to be called.
   and CI environments block multicast. Explicit `dial()` (or DHT-based
   discovery once any peer is reachable) is the fallback path and is what
   the test suite and CLI actually exercise.
+- **`put_record`/`get_record` follow the same pending-query bookkeeping as
+  `find_providers`**: each call gets a `kad::QueryId` (tracked in
+  `pending_put_record`/`pending_get_record`), and the actual result arrives
+  later as a `SwarmEvent::Behaviour(Kad(OutboundQueryProgressed { result:
+  QueryResult::PutRecord | QueryResult::GetRecord, .. }))`, at which point
+  the matching `oneshot::Sender` is resolved and removed from the map. If
+  that event never arrives (query genuinely lost, not just slow), the
+  `oneshot` is simply dropped — the caller's `.await` returns a `RecvError`
+  rather than hanging forever, but there's no explicit timeout on the query
+  itself.
 - **Custom protocol strings** (`/canopee/id/1.0.0`, `/canopee/kad/1.0.0`,
   `/canopee/objects/1.0.0`) namespace this swarm from other libp2p networks
   — two Canopee nodes will only speak Kademlia/identify/object-exchange to

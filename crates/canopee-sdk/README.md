@@ -66,6 +66,9 @@ client.announce(id.clone()).await?;                                      // "I h
 let providers = client.find_providers(id.clone()).await?;                // who else has it
 let bundle = client.fetch_object(providers[0].clone(), id).await?;       // fetch it from them directly
 
+client.publish_app_pointer("alice-portfolio", manifest_id).await?;       // sign + publish (owner, name) -> manifest
+let latest = client.resolve_app_pointer(owner_id, "alice-portfolio").await?; // None if not found or unverifiable
+
 client.publish("app-topic", b"hello".to_vec()).await?;                   // gossipsub publish
 ```
 
@@ -132,6 +135,14 @@ protocol layer itself for a couple of commands. New apps should prefer
 - The streaming nature of `subscribe` is why it's the one method that
   doesn't go through the shared `request()` helper — it needs its own
   connection that stays open, which `Subscription::open` manages directly.
+- `publish_app_pointer` only takes a `name` and a manifest `ObjectId` —
+  signing happens inside the node, not the SDK, because only the node holds
+  the private key behind its `Identity`. `resolve_app_pointer`, by
+  contrast, calls `record.verify()` itself before returning
+  `Some(manifest)`, so callers never see an unverified pointer: a `None`
+  return means either nothing was published under that name, or what came
+  back failed verification (e.g. a peer tried to serve a pointer under a
+  name they don't actually own).
 
 ## Testing
 

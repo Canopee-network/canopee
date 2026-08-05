@@ -24,8 +24,15 @@ canopee dial <multiaddr>                  # connect directly to a peer, e.g. /ip
 canopee listen-via-relay <relay-multiaddr> # request a relay circuit reservation (enables hole punching)
 canopee peers                             # list currently connected peers
 canopee relay-status                      # confirm accepted relay reservations + dialable circuit addresses
+canopee announce <object-id>              # announce on the DHT that this node provides an object
 canopee publish <topic> <message>         # publish a gossipsub message
 canopee chat <topic>                      # interactive send/receive REPL on a gossipsub topic
+
+canopee app-manifest <dir> <name>         # publish a directory (must contain index.html) as an app manifest;
+                                           # announces the manifest + every asset and publishes a signed (owner, name) pointer
+canopee app-info <manifest-id>            # decode and print a locally-stored app manifest
+canopee open <manifest-id> [--peer <id>] [--port <port>]           # fetch a manifest by id and serve it over HTTP
+canopee open --owner <id> --name <name> [--peer <id>] [--port <port>] # or resolve the latest manifest via its (owner, name) pointer
 ```
 
 Every command except `init` and `start` talks to an already-running node —
@@ -37,12 +44,17 @@ run `canopee start` (or `cargo run -p canopee-node` directly) first.
 |---|---|
 | `init` | Opens a `Runtime` directly (no node required) just to trigger identity/storage creation and print the identity |
 | `start` | Spawns `cargo run -p canopee-node` as a detached child process |
-| `stop`, `status`, `identity`, `put`, `get`, `list`, `export`, `import`, `dial`, `listen-via-relay`, `peers`, `relay-status`, `publish` | Send one `NodeCommand` to the running node via `canopee_sdk::NodeClient` and print the `NodeResponse` |
+| `stop`, `status`, `identity`, `put`, `get`, `list`, `export`, `import`, `dial`, `listen-via-relay`, `peers`, `relay-status`, `announce`, `publish` | Send one `NodeCommand` to the running node via `canopee_sdk::NodeClient` and print the `NodeResponse` |
 | `chat` | Uses `canopee_sdk::CanopeeClient` to `subscribe` (printing incoming messages on a background task) and `publish` (from stdin) on the same topic — a small persistent REPL, not a one-shot request/response |
+| `app-manifest` | Walks a directory (via [`app::publish_directory`](src/app.rs)), stores every file as a `Blob` object plus one `AppManifest` object pointing at them, `announce`s the manifest and every asset, and `publish_app_pointer`s a signed `(owner, name)` pointer to the manifest |
+| `app-info` | Local `Get` + decode of a stored `AppManifest` object |
+| `open` | Resolves a manifest id — directly, or via `resolve_app_pointer` from `--owner`/`--name` — then fetches it and every asset (locally, or from `--peer`/DHT lookup, concurrently) via [`app::fetch_app`](src/app.rs), and serves it over local HTTP via [`app::serve`](src/app.rs) |
 
 See [`docs/testing-chat-between-peers.md`](../../docs/testing-chat-between-peers.md)
 for a full walkthrough of `chat`, `peers`, and `relay-status` together to
-test two nodes talking to each other, on a LAN or through a relay.
+test two nodes talking to each other, on a LAN or through a relay. See
+[`docs/app-manifests.md`](../../docs/app-manifests.md) for the full
+publish → announce → fetch → open lifecycle of `app-manifest`/`app-info`/`open`.
 
 ## Example session
 

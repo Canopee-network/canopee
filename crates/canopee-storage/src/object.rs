@@ -35,6 +35,12 @@ pub struct ObjectInfo {
 pub enum ObjectType {
     Blob,
     AppManifest,
+    /// Points a stable `(owner, name)` pair at the latest `AppManifest`
+    /// object id. Published as a DHT record (keyed by owner+name, not by
+    /// this object's own content-addressed id) so republishing an app under
+    /// the same name lets fetchers resolve the newest version instead of
+    /// being stuck with whatever manifest id they first saw.
+    AppPointer,
     // Profile,
     // Message,
     // ...

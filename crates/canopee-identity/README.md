@@ -45,6 +45,12 @@ let keypair = identity.keypair();
 | `Identity` | Holds the keypair and derived `IdentityId`; sign/verify/create/load |
 | `IdentityId` | `canopee://identity/<PeerId>` — the node's public, stable address |
 
+`IdentityId::new(id)` builds one from a raw string — e.g. one another user
+shared out of band (an identity string printed by their `canopee identity`)
+— rather than deriving it from a keypair you hold. It does no validation of
+the string's shape; malformed input just fails to resolve to anything later
+(e.g. an app pointer lookup under a bogus owner simply finds nothing).
+
 `Identity::create`/`Identity::load` are async only because they do file I/O
 (`tokio::fs`); the crypto itself is synchronous.
 

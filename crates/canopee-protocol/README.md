@@ -25,7 +25,8 @@ Most commands are simple request → response:
 | Command | Response | Purpose |
 |---|---|---|
 | `Identity` | `Identity { identity_id }` | This node's identity |
-| `Put { data }` | `ObjectCreated { id }` | Store bytes as a signed object |
+| `Put { data }` | `ObjectCreated { id }` | Store bytes as a signed `Blob` object |
+| `PutObject { data, object_type }` | `ObjectCreated { id }` | Store bytes as a signed object of a specific `ObjectType` (e.g. `AppManifest`) |
 | `Get { id }` | `Object { object }` | Read a locally stored object |
 | `List` | `Objects { objects }` | List locally stored objects |
 | `Export { id }` | `Exported { bundle }` | Export a local object as a portable bundle |
@@ -39,6 +40,8 @@ Most commands are simple request → response:
 | `FindProviders { id }` | `Providers { peer_ids }` | Who on the DHT has announced this object |
 | `FetchObject { peer_id, id }` | `Exported { bundle }` | Fetch an object directly from a specific peer |
 | `Announce { id }` | `Announced` | Announce on the DHT that this node holds an object |
+| `PublishAppPointer { name, manifest }` | `AppPointerPublished` | Sign (with this node's identity) and publish a mutable `(owner, name) -> manifest` pointer to the DHT, overwriting any previous pointer under the same name |
+| `ResolveAppPointer { owner, name }` | `AppPointer { record }` | Look up the latest pointer published by `owner` under `name`; `record` is `None` if not found. Caller must call `record.verify()` before trusting `record.manifest` |
 | any command | `Error { message }` | Any of the above can fail with this instead |
 
 `Subscribe { topic }` is the one exception — see below.
@@ -77,6 +80,14 @@ add latency and complexity for no benefit over just keeping the socket open.
   directly, which aren't (and shouldn't be made to be) part of the wire
   contract; the protocol crate's versions use plain `String`s instead so
   clients never need a libp2p dependency just to talk to the node.
+- `PublishAppPointer` takes a `name` and `manifest` id, not a pre-signed
+  `AppPointerRecord` — signing happens inside `canopee-node`'s handler,
+  because only the node holds the `Identity`'s private key. A client (SDK or
+  CLI) can never construct a validly-signed pointer itself, only ask the
+  node to. `ResolveAppPointer`'s response, by contrast, carries the full
+  [`AppPointerRecord`](../canopee-storage) (signature included) since the
+  caller — not the node — is responsible for verifying it before trusting
+  `record.manifest`.
 
 ## Testing
 

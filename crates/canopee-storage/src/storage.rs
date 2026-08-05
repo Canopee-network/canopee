@@ -41,7 +41,7 @@ impl Storage {
 
     pub async fn exists(&self, id: &ObjectId) -> bool {
         let path = format!("{}/{}", self.root, id.0);
-        fs::try_exists(path).await.is_ok()
+        fs::try_exists(path).await.unwrap_or(false)
     }
 
     pub async fn list(&self) -> Result<Vec<ObjectId>> {

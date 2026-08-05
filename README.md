@@ -17,7 +17,10 @@ no-prior-knowledge walkthrough of the concepts and how to set up and connect
 nodes. Want to try it hands-on right away? See
 [`docs/testing-chat-between-peers.md`](docs/testing-chat-between-peers.md) for
 a step-by-step walkthrough of chatting between two peers, on the same LAN or
-through a relay.
+through a relay. Want to publish and open a small static app (e.g. a
+portfolio site) peer-to-peer? See
+[`docs/app-manifests.md`](docs/app-manifests.md) for publishing, announcing,
+fetching, and serving app manifests.
 
 ## Workspace layout
 

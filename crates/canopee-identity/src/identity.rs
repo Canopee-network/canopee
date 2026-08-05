@@ -4,8 +4,17 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 
 #[allow(unused)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct IdentityId(String);
+
+impl IdentityId {
+    /// Builds an `IdentityId` from a previously-displayed
+    /// `canopee://identity/<peer-id>` string, e.g. one shared out of band by
+    /// another user. Does not validate the peer id is well-formed.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+}
 
 impl std::fmt::Display for IdentityId {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {

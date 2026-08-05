@@ -320,6 +320,45 @@ impl Node {
                     },
                 }
             }
+
+            NodeCommand::PublishAppPointer { name, manifest } => {
+                let result = async {
+                    let record = canopee_storage::AppPointerRecord::sign(
+                        self.runtime.identity(),
+                        &name,
+                        manifest,
+                    )?;
+                    let key = canopee_storage::AppPointerRecord::key(&record.owner, &name);
+                    let value = bincode::serialize(&record)?;
+                    self.runtime.network.put_record(key, value).await
+                }
+                .await;
+
+                match result {
+                    Ok(()) => NodeResponse::AppPointerPublished,
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+
+            NodeCommand::ResolveAppPointer { owner, name } => {
+                let key = canopee_storage::AppPointerRecord::key(&owner, &name);
+                match self.runtime.network.get_record(key).await {
+                    Ok(Some(bytes)) => match bincode::deserialize(&bytes) {
+                        Ok(record) => NodeResponse::AppPointer {
+                            record: Some(record),
+                        },
+                        Err(e) => NodeResponse::Error {
+                            message: format!("Corrupt app pointer record: {e}"),
+                        },
+                    },
+                    Ok(None) => NodeResponse::AppPointer { record: None },
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
         }
     }
 }

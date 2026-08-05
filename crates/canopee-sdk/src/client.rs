@@ -179,6 +179,51 @@ impl CanopeeClient {
         }
     }
 
+    /// Signs and publishes a pointer from this node's `(identity, name)` to
+    /// `manifest`, so peers can resolve the latest version of an app
+    /// published under `name` without needing a fresh manifest id out of
+    /// band every time it's republished. Overwrites any pointer previously
+    /// published under the same name.
+    pub async fn publish_app_pointer(
+        &self,
+        name: impl Into<String>,
+        manifest: ObjectId,
+    ) -> anyhow::Result<()> {
+        match self
+            .request(NodeCommand::PublishAppPointer {
+                name: name.into(),
+                manifest,
+            })
+            .await?
+        {
+            NodeResponse::AppPointerPublished => Ok(()),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Resolves the latest manifest id published by `owner` under `name`,
+    /// verifying the pointer's signature actually belongs to `owner`.
+    /// Returns `None` if no (verifiable) pointer is found.
+    pub async fn resolve_app_pointer(
+        &self,
+        owner: IdentityId,
+        name: impl Into<String>,
+    ) -> anyhow::Result<Option<ObjectId>> {
+        match self
+            .request(NodeCommand::ResolveAppPointer {
+                owner,
+                name: name.into(),
+            })
+            .await?
+        {
+            NodeResponse::AppPointer { record: Some(record) } if record.verify() => {
+                Ok(Some(record.manifest))
+            }
+            NodeResponse::AppPointer { .. } => Ok(None),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
     /// Fetches an object directly from a specific peer (typically one found
     /// via [`Self::find_providers`]) and stores it locally.
     pub async fn fetch_object(

@@ -44,6 +44,15 @@ enum Command {
         reply: oneshot::Sender<Vec<PeerId>>,
     },
     Announce(ObjectId),
+    PutRecord {
+        key: Vec<u8>,
+        value: Vec<u8>,
+        reply: oneshot::Sender<anyhow::Result<()>>,
+    },
+    GetRecord {
+        key: Vec<u8>,
+        reply: oneshot::Sender<anyhow::Result<Option<Vec<u8>>>>,
+    },
     GetObject {
         peer_id: PeerId,
         object_id: ObjectId,
@@ -180,6 +189,29 @@ impl NetworkManager {
         Ok(())
     }
 
+    /// Publishes an arbitrary, mutable DHT record under `key` (unlike
+    /// `announce`, which just marks this node as a provider of an existing
+    /// content-addressed object). Overwrites whatever was previously stored
+    /// at `key`, network-wide — used for app pointers so republishing under
+    /// the same name updates what fetchers resolve to.
+    pub async fn put_record(&self, key: Vec<u8>, value: Vec<u8>) -> anyhow::Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.commands
+            .send(Command::PutRecord { key, value, reply })
+            .await?;
+        rx.await?
+    }
+
+    /// Looks up a record previously published with `put_record`. Returns
+    /// `None` if no record is found for `key`.
+    pub async fn get_record(&self, key: Vec<u8>) -> anyhow::Result<Option<Vec<u8>>> {
+        let (reply, rx) = oneshot::channel();
+        self.commands
+            .send(Command::GetRecord { key, reply })
+            .await?;
+        rx.await?
+    }
+
     pub async fn get_object(
         &self,
         peer_id: PeerId,
@@ -255,6 +287,12 @@ async fn run_event_loop(
     let mut relay_reservations: HashMap<PeerId, RelayReservation> = HashMap::new();
     let mut pending_get_providers: HashMap<kad::QueryId, oneshot::Sender<Vec<PeerId>>> =
         HashMap::new();
+    let mut pending_put_record: HashMap<kad::QueryId, oneshot::Sender<anyhow::Result<()>>> =
+        HashMap::new();
+    let mut pending_get_record: HashMap<
+        kad::QueryId,
+        oneshot::Sender<anyhow::Result<Option<Vec<u8>>>>,
+    > = HashMap::new();
     let mut pending_get_object: HashMap<
         request_response::OutboundRequestId,
         oneshot::Sender<anyhow::Result<ExportBundle>>,
@@ -269,6 +307,8 @@ async fn run_event_loop(
                     &mut peers,
                     &mut relay_reservations,
                     &mut pending_get_providers,
+                    &mut pending_put_record,
+                    &mut pending_get_record,
                     &mut pending_get_object,
                     &object_provider,
                     &pubsub,
@@ -276,7 +316,16 @@ async fn run_event_loop(
             }
             command = commands.recv() => {
                 let Some(command) = command else { break };
-                handle_command(&mut swarm, command, &mut pending_get_providers, &mut pending_get_object, &peers, &relay_reservations);
+                handle_command(
+                    &mut swarm,
+                    command,
+                    &mut pending_get_providers,
+                    &mut pending_put_record,
+                    &mut pending_get_record,
+                    &mut pending_get_object,
+                    &peers,
+                    &relay_reservations,
+                );
             }
         }
     }
@@ -286,6 +335,11 @@ fn handle_command(
     swarm: &mut libp2p::Swarm<CanopeeBehaviour>,
     command: Command,
     pending_get_providers: &mut HashMap<kad::QueryId, oneshot::Sender<Vec<PeerId>>>,
+    pending_put_record: &mut HashMap<kad::QueryId, oneshot::Sender<anyhow::Result<()>>>,
+    pending_get_record: &mut HashMap<
+        kad::QueryId,
+        oneshot::Sender<anyhow::Result<Option<Vec<u8>>>>,
+    >,
     pending_get_object: &mut HashMap<
         request_response::OutboundRequestId,
         oneshot::Sender<anyhow::Result<ExportBundle>>,
@@ -315,6 +369,24 @@ fn handle_command(
             if let Err(e) = swarm.behaviour_mut().kad.start_providing(key) {
                 tracing::warn!("Failed to announce object {object_id}: {e}");
             }
+        }
+        Command::PutRecord { key, value, reply } => {
+            let record = kad::Record::new(kad::RecordKey::new(&key), value);
+            match swarm.behaviour_mut().kad.put_record(record, kad::Quorum::One) {
+                Ok(query_id) => {
+                    pending_put_record.insert(query_id, reply);
+                }
+                Err(e) => {
+                    let _ = reply.send(Err(anyhow::anyhow!("Failed to put record: {e}")));
+                }
+            }
+        }
+        Command::GetRecord { key, reply } => {
+            let query_id = swarm
+                .behaviour_mut()
+                .kad
+                .get_record(kad::RecordKey::new(&key));
+            pending_get_record.insert(query_id, reply);
         }
         Command::GetObject {
             peer_id,
@@ -366,6 +438,11 @@ async fn handle_swarm_event(
     peers: &mut HashMap<PeerId, Peer>,
     relay_reservations: &mut HashMap<PeerId, RelayReservation>,
     pending_get_providers: &mut HashMap<kad::QueryId, oneshot::Sender<Vec<PeerId>>>,
+    pending_put_record: &mut HashMap<kad::QueryId, oneshot::Sender<anyhow::Result<()>>>,
+    pending_get_record: &mut HashMap<
+        kad::QueryId,
+        oneshot::Sender<anyhow::Result<Option<Vec<u8>>>>,
+    >,
     pending_get_object: &mut HashMap<
         request_response::OutboundRequestId,
         oneshot::Sender<anyhow::Result<ExportBundle>>,
@@ -507,6 +584,39 @@ async fn handle_swarm_event(
                     kad::GetProvidersOk::FinishedWithNoAdditionalRecord { .. } => Vec::new(),
                 };
                 let _ = reply.send(providers);
+            }
+        }
+        SwarmEvent::Behaviour(CanopeeBehaviourEvent::Kad(
+            kad::Event::OutboundQueryProgressed {
+                id,
+                result: kad::QueryResult::PutRecord(result),
+                ..
+            },
+        )) => {
+            if let Some(reply) = pending_put_record.remove(&id) {
+                let result = result
+                    .map(|_| ())
+                    .map_err(|e| anyhow::anyhow!("Failed to put record: {e}"));
+                let _ = reply.send(result);
+            }
+        }
+        SwarmEvent::Behaviour(CanopeeBehaviourEvent::Kad(
+            kad::Event::OutboundQueryProgressed {
+                id,
+                result: kad::QueryResult::GetRecord(result),
+                ..
+            },
+        )) => {
+            if let Some(reply) = pending_get_record.remove(&id) {
+                let result = match result {
+                    Ok(kad::GetRecordOk::FoundRecord(peer_record)) => {
+                        Ok(Some(peer_record.record.value))
+                    }
+                    Ok(kad::GetRecordOk::FinishedWithNoAdditionalRecord { .. }) => Ok(None),
+                    Err(kad::GetRecordError::NotFound { .. }) => Ok(None),
+                    Err(e) => Err(anyhow::anyhow!("Failed to get record: {e}")),
+                };
+                let _ = reply.send(result);
             }
         }
         SwarmEvent::Behaviour(CanopeeBehaviourEvent::ObjectExchange(

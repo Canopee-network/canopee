@@ -329,6 +329,7 @@ dependencies = [
  "canopee-storage",
  "clap",
  "dirs",
+ "futures",
  "serde",
  "tokio",
  "walkdir",

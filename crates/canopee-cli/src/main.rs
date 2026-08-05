@@ -1,11 +1,11 @@
 use canopee_protocol::{NodeCommand, NodeResponse};
 use canopee_runtime::Runtime;
 use canopee_sdk::{CanopeeClient, NodeClient};
-use canopee_storage::{ExportBundle, ObjectId, ObjectType};
+use canopee_storage::{AppManifest, ExportBundle, ObjectId, ObjectType};
 use clap::{Parser, Subcommand};
 use tokio::io::{AsyncBufReadExt, BufReader};
 mod app;
-use app::{AppManifest, publish_directory};
+use app::{fetch_app, publish_directory, serve};
 use std::path::Path;
 
 #[derive(Parser)]
@@ -43,6 +43,11 @@ enum Commands {
     },
     Peers,
     RelayStatus,
+    /// Announces on the DHT that this node provides the given object, so
+    /// other peers can discover it via `find-providers`.
+    Announce {
+        id: String,
+    },
     Publish {
         topic: String,
         message: String,
@@ -57,6 +62,22 @@ enum Commands {
     },
     AppInfo {
         id: String,
+    },
+    /// Fetches an app manifest and its assets (from a peer if not stored
+    /// locally) and serves them over HTTP for viewing in a browser. Either
+    /// pass a manifest id directly, or `--owner`/`--name` to resolve the
+    /// latest manifest published under that name (so republishing doesn't
+    /// require sharing a new id).
+    Open {
+        id: Option<String>,
+        #[arg(long)]
+        owner: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        peer: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        port: u16,
     },
 }
 
@@ -317,6 +338,21 @@ async fn main() {
             }
         }
 
+        Commands::Announce { id } => {
+            let client = NodeClient::new().await.unwrap();
+            let object_id = ObjectId::new(&id);
+            let response = client
+                .request(NodeCommand::Announce { id: object_id })
+                .await
+                .unwrap();
+
+            match response {
+                NodeResponse::Announced => println!("Announced {}", id),
+                NodeResponse::Error { message } => eprintln!("Error: {}", message),
+                _ => {}
+            }
+        }
+
         Commands::Publish { topic, message } => {
             let client = NodeClient::new().await.unwrap();
             let response = client
@@ -389,9 +425,24 @@ async fn main() {
                 .await
                 .unwrap();
 
+            client.announce(object_id.clone()).await.unwrap();
+            client.announce(manifest.entrypoint.clone()).await.unwrap();
+            for asset_id in manifest.assets.values() {
+                client.announce(asset_id.clone()).await.unwrap();
+            }
+            client
+                .publish_app_pointer(manifest.name.clone(), object_id.clone())
+                .await
+                .unwrap();
+
             println!();
-            println!("Application published:");
+            println!("Application published and announced:");
             println!("{}", object_id);
+            println!();
+            println!(
+                "Republishing under the same name (\"{}\") will update what `open --owner ... --name {}` resolves to.",
+                manifest.name, manifest.name
+            );
         }
 
         Commands::AppInfo { id } => {
@@ -415,6 +466,31 @@ async fn main() {
                 }
                 _ => {}
             }
+        }
+
+        Commands::Open {
+            id,
+            owner,
+            name,
+            peer,
+            port,
+        } => {
+            let client = CanopeeClient::connect().await.unwrap();
+
+            let manifest_id = match (id, owner, name) {
+                (Some(id), _, _) => ObjectId::new(&id),
+                (None, Some(owner), Some(name)) => client
+                    .resolve_app_pointer(canopee_sdk::IdentityId::new(owner), name.clone())
+                    .await
+                    .unwrap()
+                    .unwrap_or_else(|| panic!("no app pointer found for \"{name}\"")),
+                _ => panic!("pass either <id> or both --owner and --name"),
+            };
+
+            let (manifest, files) = fetch_app(&client, manifest_id, peer).await.unwrap();
+
+            println!("Opening \"{}\" by {}", manifest.name, manifest.owner);
+            serve(files, port).await.unwrap();
         }
     }
 }

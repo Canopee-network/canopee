@@ -1,5 +1,5 @@
 use canopee_identity::IdentityId;
-use canopee_storage::{ExportBundle, Object, ObjectId, ObjectInfo, ObjectType};
+use canopee_storage::{AppPointerRecord, ExportBundle, Object, ObjectId, ObjectInfo, ObjectType};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -73,6 +73,20 @@ pub enum NodeCommand {
     Announce {
         id: ObjectId,
     },
+    /// Signs (with the node's own identity) and publishes an `AppPointerRecord`
+    /// mapping `name` to `manifest`, so peers who don't know `manifest`'s id
+    /// yet can resolve it via `ResolveAppPointer { owner: <this node's
+    /// identity>, name }`. Republishing under the same `name` overwrites the
+    /// previous pointer.
+    PublishAppPointer {
+        name: String,
+        manifest: ObjectId,
+    },
+    /// Looks up the latest `AppPointerRecord` published by `owner` under `name`.
+    ResolveAppPointer {
+        owner: IdentityId,
+        name: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -119,4 +133,8 @@ pub enum NodeResponse {
         peer_ids: Vec<String>,
     },
     Announced,
+    AppPointerPublished,
+    AppPointer {
+        record: Option<AppPointerRecord>,
+    },
 }
