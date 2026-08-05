@@ -14,7 +14,8 @@ communication — without needing to run their own network stack.
 New to P2P networking or NAT/relays/DHTs? Start with
 [`docs/networking-for-beginners.md`](docs/networking-for-beginners.md) — a
 no-prior-knowledge walkthrough of the concepts and how to set up and connect
-nodes.
+nodes. Wondering how this compares to IPFS, Iroh, or other P2P projects?
+See [`docs/comparison.md`](docs/comparison.md).
 
 Other docs, roughly in the order you'd want them:
 
