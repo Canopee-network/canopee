@@ -81,6 +81,14 @@ In practice, today, that means:
   safe subset of `NodeCommand`s to browser JS. Nothing in this repo
   attempts that yet; treat it as an open design question, not a documented
   limitation with a workaround.
+- **This is only true for a plain browser tab.** A desktop shell like
+  [Tauri](https://tauri.app) sidesteps the whole problem: its Rust backend
+  can link `canopee-sdk`/`canopee-runtime` directly and expose it to the
+  same app's frontend over Tauri's own IPC — no gateway needed, because
+  the "backend" and the "UI" ship as one app instead of a webpage talking
+  to a socket it can't reach. See
+  [`tauri-chat-app-tutorial.md`](tauri-chat-app-tutorial.md) for a worked
+  example.
 
 ## Which one do you want?
 
@@ -93,7 +101,14 @@ In practice, today, that means:
   pointers — **as part of its own logic, not just to be hosted by it**?
   Build it on [`canopee-sdk`](../crates/canopee-sdk/README.md) directly,
   the way `canopee-cli` itself does.
-- **Want a browser-based UI for something built on `canopee-sdk`?**
-  You'll need your own bridge between the two today — see
-  [Where they meet](#where-they-meet) above. This is the one combination
-  that isn't already solved for you.
+- **Want a real UI on top of `canopee-sdk`, with no separate node process
+  for the user to run?** A desktop shell like Tauri sidesteps the "no
+  bridge between a browser tab and canopee-sdk" problem entirely — its
+  Rust backend links `canopee-sdk`/`canopee-runtime` directly and talks to
+  its own frontend over Tauri's own IPC, no gateway needed. See
+  [`tauri-chat-app-tutorial.md`](tauri-chat-app-tutorial.md) for a
+  worked example (a chat app with an embedded node).
+- **Want a browser-based UI for something built on `canopee-sdk`, with no
+  desktop shell?** You'll still need your own bridge between the two
+  today — see [Where they meet](#where-they-meet) above. This is the one
+  combination that isn't already solved for you.

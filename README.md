@@ -14,26 +14,37 @@ communication — without needing to run their own network stack.
 New to P2P networking or NAT/relays/DHTs? Start with
 [`docs/networking-for-beginners.md`](docs/networking-for-beginners.md) — a
 no-prior-knowledge walkthrough of the concepts and how to set up and connect
-nodes. Want to try it hands-on right away? See
-[`docs/testing-chat-between-peers.md`](docs/testing-chat-between-peers.md) for
-a step-by-step walkthrough of chatting between two peers, on the same LAN or
-through a relay. Want to publish and open a small static app (e.g. a
-portfolio site) peer-to-peer? See
-[`docs/app-manifests.md`](docs/app-manifests.md) for publishing, announcing,
-fetching, and serving app manifests. Not sure whether you want that or a
-full `canopee-sdk` app — they're not the same thing? See
-[`docs/publishing-vs-building-apps.md`](docs/publishing-vs-building-apps.md)
-for the distinction. Want to go further and make published
-apps survive the original publisher going offline? See
-[`docs/p2p-app-caching-tutorial.md`](docs/p2p-app-caching-tutorial.md) — a
-step-by-step, learn-by-doing guide (no code given) to implementing
-fetch-and-reannounce caching yourself. Wondering how a brand-new node finds
-its first peer at all, without a human pasting a multiaddr? See
-[`docs/bootstrap-nodes-tutorial.md`](docs/bootstrap-nodes-tutorial.md) for a
-learn-by-doing guide to community/public bootstrap relay lists. Publishing
-a real React/Vite build rather than a hand-written page? See
-[`docs/spa-hosting-tutorial.md`](docs/spa-hosting-tutorial.md) for a
-learn-by-doing guide to SPA client-side routing and MIME type coverage.
+nodes.
+
+Other docs, roughly in the order you'd want them:
+
+- [`docs/testing-chat-between-peers.md`](docs/testing-chat-between-peers.md) —
+  hands-on walkthrough of chatting between two peers, on the same LAN or
+  through a relay.
+- [`docs/app-manifests.md`](docs/app-manifests.md) — publishing, announcing,
+  resolving, fetching, and serving a static app/site peer-to-peer.
+- [`docs/publishing-vs-building-apps.md`](docs/publishing-vs-building-apps.md) —
+  the difference between publishing static content via `app-manifest` and
+  building a real program on [`canopee-sdk`](crates/canopee-sdk); read this
+  if you're not sure which one you want.
+- [`docs/tauri-chat-app-tutorial.md`](docs/tauri-chat-app-tutorial.md) — a
+  learn-by-doing guide to building a desktop chat app on `canopee-sdk`/
+  `canopee-runtime` with an embedded node, so installing the app is the
+  only setup step.
+- [`docs/spa-hosting-tutorial.md`](docs/spa-hosting-tutorial.md) — a
+  learn-by-doing guide to publishing a real React/Vite build (client-side
+  routing, MIME type coverage) rather than a hand-written page.
+- [`docs/p2p-app-caching-tutorial.md`](docs/p2p-app-caching-tutorial.md) — a
+  learn-by-doing guide to making published apps survive their original
+  publisher going offline (fetch-and-reannounce caching).
+- [`docs/bootstrap-nodes-tutorial.md`](docs/bootstrap-nodes-tutorial.md) — a
+  learn-by-doing guide to community/public bootstrap relay lists, so a
+  brand-new node can find its first peer without a human pasting a
+  multiaddr.
+- [`docs/roadmap-hosting-replacement.md`](docs/roadmap-hosting-replacement.md) —
+  a gap analysis of what it would take for Canopee to genuinely replace a
+  commercial hosting provider, and which gaps are buildable vs. which are
+  structural tensions with being decentralized at all.
 
 ## Workspace layout
 
