@@ -106,8 +106,13 @@ In practice, today, that means:
   bridge between a browser tab and canopee-sdk" problem entirely — its
   Rust backend links `canopee-sdk`/`canopee-runtime` directly and talks to
   its own frontend over Tauri's own IPC, no gateway needed. See
-  [`tauri-chat-app-tutorial.md`](tauri-chat-app-tutorial.md) for a
-  worked example (a chat app with an embedded node).
+  [`tauri-presence-app-tutorial.md`](tauri-presence-app-tutorial.md) for
+  the smallest worked example, or
+  [`tauri-chat-app-tutorial.md`](tauri-chat-app-tutorial.md),
+  [`tauri-multiplayer-game-tutorial.md`](tauri-multiplayer-game-tutorial.md),
+  and [`tauri-collab-editor-tutorial.md`](tauri-collab-editor-tutorial.md)
+  for progressively more involved ones. [`app-ideas.md`](app-ideas.md)
+  has a longer list beyond what has a tutorial yet.
 - **Want a browser-based UI for something built on `canopee-sdk`, with no
   desktop shell?** You'll still need your own bridge between the two
   today — see [Where they meet](#where-they-meet) above. This is the one

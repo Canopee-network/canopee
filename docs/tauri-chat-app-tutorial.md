@@ -329,3 +329,21 @@ By the end, two people should be able to install your app, exchange a
 short identity string once (in person, over text, whatever), and message
 each other for real — with the "no other setup step" claim actually true,
 because there's no `canopee-node` process to separately run.
+
+Want to build something else on this same foundation? Steps 1–3 above
+(custom config root, embedded runtime, identity exchange) apply to any
+Tauri app on Canopee, not just chat:
+
+- [`tauri-multiplayer-game-tutorial.md`](tauri-multiplayer-game-tutorial.md)
+  reuses them directly for a desktop multiplayer game, then covers what
+  changes once your messages are game moves instead of chat text (ordering
+  and delivery guarantees matter a lot more).
+- [`tauri-collab-editor-tutorial.md`](tauri-collab-editor-tutorial.md)
+  reuses them for a collaborative document editor, where — unlike a
+  game — divergent state can't just be detected and rejected; it has to
+  be automatically merged, which needs a CRDT.
+- [`tauri-presence-app-tutorial.md`](tauri-presence-app-tutorial.md) is
+  smaller than any of the above — worth reading first if this tutorial
+  felt like a big first step.
+- [`app-ideas.md`](app-ideas.md) has a longer list of app ideas beyond
+  what has a tutorial yet.

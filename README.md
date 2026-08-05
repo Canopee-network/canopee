@@ -17,7 +17,7 @@ no-prior-knowledge walkthrough of the concepts and how to set up and connect
 nodes. Wondering how this compares to IPFS, Iroh, or other P2P projects?
 See [`docs/comparison.md`](docs/comparison.md).
 
-Other docs, roughly in the order you'd want them:
+**Tutorials**, roughly in the order you'd want them:
 
 - [`docs/testing-chat-between-peers.md`](docs/testing-chat-between-peers.md) —
   hands-on walkthrough of chatting between two peers, on the same LAN or
@@ -28,10 +28,22 @@ Other docs, roughly in the order you'd want them:
   the difference between publishing static content via `app-manifest` and
   building a real program on [`canopee-sdk`](crates/canopee-sdk); read this
   if you're not sure which one you want.
+- [`docs/tauri-presence-app-tutorial.md`](docs/tauri-presence-app-tutorial.md) —
+  the smallest real `canopee-sdk` app: a desktop "who's online" presence
+  indicator. Good starting point before the two below.
 - [`docs/tauri-chat-app-tutorial.md`](docs/tauri-chat-app-tutorial.md) — a
   learn-by-doing guide to building a desktop chat app on `canopee-sdk`/
   `canopee-runtime` with an embedded node, so installing the app is the
   only setup step.
+- [`docs/tauri-multiplayer-game-tutorial.md`](docs/tauri-multiplayer-game-tutorial.md) —
+  a learn-by-doing guide to a desktop multiplayer game on the same
+  embedded-node foundation, covering lockstep move ordering and state
+  divergence detection on top of gossipsub's unordered, best-effort
+  delivery. Builds directly on the chat tutorial above.
+- [`docs/tauri-collab-editor-tutorial.md`](docs/tauri-collab-editor-tutorial.md) —
+  a learn-by-doing guide to a peer-to-peer collaborative document editor,
+  using a CRDT to merge concurrent edits automatically rather than
+  detecting and rejecting conflicts.
 - [`docs/spa-hosting-tutorial.md`](docs/spa-hosting-tutorial.md) — a
   learn-by-doing guide to publishing a real React/Vite build (client-side
   routing, MIME type coverage) rather than a hand-written page.
@@ -42,6 +54,12 @@ Other docs, roughly in the order you'd want them:
   learn-by-doing guide to community/public bootstrap relay lists, so a
   brand-new node can find its first peer without a human pasting a
   multiaddr.
+
+**Reference and roadmap docs** — not tutorials, but useful context:
+
+- [`docs/app-ideas.md`](docs/app-ideas.md) — a longer list of possible
+  apps beyond what has a tutorial yet, sorted by how well-scoped each one
+  is.
 - [`docs/roadmap-hosting-replacement.md`](docs/roadmap-hosting-replacement.md) —
   a gap analysis of what it would take for Canopee to genuinely replace a
   commercial hosting provider, and which gaps are buildable vs. which are
