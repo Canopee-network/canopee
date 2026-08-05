@@ -20,7 +20,11 @@ a step-by-step walkthrough of chatting between two peers, on the same LAN or
 through a relay. Want to publish and open a small static app (e.g. a
 portfolio site) peer-to-peer? See
 [`docs/app-manifests.md`](docs/app-manifests.md) for publishing, announcing,
-fetching, and serving app manifests.
+fetching, and serving app manifests. Want to go further and make published
+apps survive the original publisher going offline? See
+[`docs/p2p-app-caching-tutorial.md`](docs/p2p-app-caching-tutorial.md) — a
+step-by-step, learn-by-doing guide (no code given) to implementing
+fetch-and-reannounce caching yourself.
 
 ## Workspace layout
 

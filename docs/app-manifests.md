@@ -291,3 +291,9 @@ shared out of band.
   records expire and rely on republishing to stay alive. A pointer or
   provider announcement that hasn't been refreshed in a while may need to
   be re-published/re-announced.
+- An app is only reachable while its original publisher's node is online —
+  `open` only ever fetches from whoever `find_providers` returns, and today
+  that's only the publisher, since fetchers don't announce what they cache.
+  See [`p2p-app-caching-tutorial.md`](p2p-app-caching-tutorial.md) for a
+  guided walkthrough of building fetch-and-reannounce caching so apps
+  survive their publisher going offline.
