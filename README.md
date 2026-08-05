@@ -45,6 +45,10 @@ Other docs, roughly in the order you'd want them:
   a gap analysis of what it would take for Canopee to genuinely replace a
   commercial hosting provider, and which gaps are buildable vs. which are
   structural tensions with being decentralized at all.
+- [`docs/security-considerations.md`](docs/security-considerations.md) — a
+  standing reference for what's handled (signed/content-addressed objects,
+  verified app pointers) and what isn't yet (message/content encryption,
+  key revocation, DHT/bootstrap trust, cache node accountability).
 
 ## Workspace layout
 

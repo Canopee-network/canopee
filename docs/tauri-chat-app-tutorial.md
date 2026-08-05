@@ -114,6 +114,12 @@ one machine" will actually work before you wire up any UI.
 (using Step 1's custom root) and keeps it alive for the app's lifetime —
 no `canopee-node` process anywhere.
 
+This is also a real security win, not just a convenience one — see
+[`security-considerations.md`](security-considerations.md#local-trust-boundary-the-nodes-socket)
+for why removing the shared Unix socket shrinks the local trust boundary
+to "your own app's process" instead of "anything on the machine that can
+reach a well-known socket path."
+
 **Where:** Tauri's `setup` hook (in your `tauri::Builder`, run once at
 startup) is where you'll call `Runtime::open()`. You'll need to store the
 resulting `Runtime` somewhere the rest of your `#[tauri::command]`
@@ -279,6 +285,11 @@ resolving the per-conversation record — not by the sender re-sending
 anything live.
 
 ## Step 6 (stretch): actual message privacy
+
+See [`security-considerations.md`](security-considerations.md#no-content-or-message-encryption)
+for this gap stated as a standing concern, not just specific to this
+tutorial — it applies to any app built on gossipsub/objects, not only a
+chat app.
 
 Everything above uses gossipsub and signed objects, both of which are
 **visible to anyone who can observe them** — gossipsub messages are signed

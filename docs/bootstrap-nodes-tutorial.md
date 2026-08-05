@@ -226,7 +226,10 @@ code.
 Steps 1–3 get you a *shippable* feature — a real improvement over today,
 where zero built-in bootstrap addresses exist. But a hardcoded list
 requires a new release every time it needs updating, and centralizes
-"whose addresses are trustworthy" in whoever maintains the binary.
+"whose addresses are trustworthy" in whoever maintains the binary. See
+[`security-considerations.md`](security-considerations.md#dht-and-bootstrap-trust)
+for why this specific step is also a security question, not just an
+operational one.
 
 This step is intentionally more open-ended — think through the tradeoffs
 rather than committing to one path blindly:

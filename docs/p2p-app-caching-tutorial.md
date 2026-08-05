@@ -62,6 +62,13 @@ continuing.
 also announces itself as a provider of that object — so `find_providers`
 starts returning *both* Alice and Pierre.
 
+Once this step ships, any cache node can announce itself as a provider
+with no accountability for actually serving requests well — see
+[`security-considerations.md`](security-considerations.md#cache-poisoning-and-availability-attacks)
+for that tradeoff in more detail. It doesn't block building this step, but
+it's worth knowing about before treating a large fleet of cache nodes as
+fully trustworthy.
+
 **Where:** `get_or_fetch` in `crates/canopee-cli/src/app.rs`. Look at the
 line that calls `client.import(bundle.clone()).await?;` — that's the moment
 an object becomes locally available. Right after it succeeds, that's where
