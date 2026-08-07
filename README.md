@@ -54,6 +54,11 @@ See [`docs/comparison.md`](docs/comparison.md).
   learn-by-doing guide to community/public bootstrap relay lists, so a
   brand-new node can find its first peer without a human pasting a
   multiaddr.
+- [`docs/multi-device-identity.md`](docs/multi-device-identity.md) — a
+  learn-by-doing guide to using the same identity from a laptop and a
+  phone: the honest manual key-copy version, an encrypted pairing-flow
+  version, and what a real (cross-signed, independently revocable)
+  multi-device design would need instead.
 
 **Reference and roadmap docs** — not tutorials, but useful context:
 
@@ -68,6 +73,10 @@ See [`docs/comparison.md`](docs/comparison.md).
   standing reference for what's handled (signed/content-addressed objects,
   verified app pointers) and what isn't yet (message/content encryption,
   key revocation, DHT/bootstrap trust, cache node accountability).
+- [`docs/end-to-end-encryption.md`](docs/end-to-end-encryption.md) — what
+  the X25519 key-agreement primitive in `canopee-identity` gives you, and
+  the much larger set of things (encryption, ratcheting, group keys,
+  key discovery) it deliberately doesn't — those remain app-layer work.
 
 ## Workspace layout
 
