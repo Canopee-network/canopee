@@ -284,30 +284,144 @@ and confirm it discovers and displays the missed message purely by
 resolving the per-conversation record — not by the sender re-sending
 anything live.
 
-## Step 6 (stretch): actual message privacy
+## Step 6: end-to-end message encryption
 
-See [`security-considerations.md`](security-considerations.md#no-content-or-message-encryption)
-for this gap stated as a standing concern, not just specific to this
-tutorial — it applies to any app built on gossipsub/objects, not only a
-chat app.
+**Goal:** messages exchanged in Step 4, and stored as objects in Step 5,
+are unreadable to anyone except the two participants — not the relay that
+might be forwarding your connection, not another peer subscribed to (or
+guessing) your conversation's topic string, not a cache node holding a
+copy of a message object.
 
-Everything above uses gossipsub and signed objects, both of which are
-**visible to anyone who can observe them** — gossipsub messages are signed
-(so tampering/impersonation is detectable) but not encrypted for a
-specific recipient, and objects in local storage are similarly
-signed-not-encrypted. A real chat app needs end-to-end encryption so a
-relay/observer (or, per
-[`canopee-network/README.md`](../crates/canopee-network/README.md), any
-node that happens to relay your traffic) can't read message contents.
+Read [`end-to-end-encryption.md`](end-to-end-encryption.md) first — it
+explains what `canopee-identity` now provides (an X25519 key-agreement
+primitive on `Identity`) and, at length, everything it deliberately
+doesn't: encryption itself, key discovery, forward secrecy, group
+messaging. This step is where this tutorial actually builds the pieces
+that doc says are still missing, scoped to what a 1:1 chat needs — it
+doesn't fully close every gap that doc lists (notably: no ratcheting, no
+groups; see the stretch note at the end of this step).
 
-This is out of scope for this tutorial to design in full — it's a
-substantial cryptographic feature (something like the Signal/Double
-Ratchet protocol, or at minimum per-conversation symmetric encryption with
-a key exchange using each participant's existing Ed25519 identity key via
-X25519 conversion) — but it's the single most important gap between "a
-working demo" and "something you'd trust with real conversations." If you
-build nothing else from this stretch step, at least don't market your app
-as private/secure until this is solved.
+Everything before this step is **visible to anyone who can observe it**:
+gossipsub messages are signed (tampering/impersonation is detectable) but
+not encrypted for a specific recipient, and stored `Object`s are
+similarly signed-not-encrypted — see
+[`security-considerations.md`](security-considerations.md#no-content-or-message-encryption)
+for this stated as a standing concern across any app on gossipsub/objects,
+not just this one. A relay in the middle of a relayed connection
+(`security-considerations.md`'s Transport section) can read whatever
+passes through it today, precisely because Noise is hop-by-hop, not
+end-to-end — encrypting the message payload itself, before it ever
+reaches `network.publish` or `Storage`, is what removes the relay (and
+every other observer) from the trust picture entirely, regardless of how
+many hops a message crosses.
+
+### 6a: publish your DH public key so contacts can find it
+
+**Where:** `Identity::dh_public_key()` in
+[`canopee-identity`](../crates/canopee-identity/README.md#key-agreement-x25519)
+returns this identity's X25519 public key — but nothing today lets another
+peer look it up from just an `IdentityId`. You have to build that lookup;
+`canopee-identity` deliberately stops at the primitive.
+
+**What to build:** the simplest option, following the same shape as
+`AppManifest` in [`canopee-storage`](../crates/canopee-storage/README.md#app-manifests-and-pointers):
+a small signed `Object` — e.g. `ObjectType::Blob` containing your
+`dh_public_key()` bytes plus your `IdentityId`, so it's self-describing —
+that you `put_verified` locally and `announce` on the DHT at startup. A
+contact resolves it via `find_providers`/`FetchObject` the same way any
+other object is fetched. (A DHT record keyed by `IdentityId`, mirroring
+`AppPointerRecord`, is the more "correct" long-term shape — since a
+profile object's `ObjectId` changes if the DH key ever changes, and you'd
+want a stable, resolvable key. Building the plain object version first is
+enough to unblock the rest of this step; treat the pointer-based version
+as a follow-up once you've felt the object version's limits.)
+
+**How to verify:** with two connected instances (Step 3), have each side
+fetch the other's DH-key object and confirm the bytes it gets back match
+what `dh_public_key()` returns on the other instance directly (e.g. by
+also exposing a debug command that prints it) — you're checking the
+lookup path works before trusting it for anything cryptographic.
+
+### 6b: derive a symmetric key, don't use `agree()`'s output directly
+
+**Where:** `Identity::agree(&their_dh_public_key)` returns a raw
+`[u8; 32]` Diffie-Hellman output — the
+[`canopee-identity`](../crates/canopee-identity/README.md#key-agreement-x25519)
+docs are explicit that this is not a cipher key.
+
+**What to build:** run `agree()`'s output through a KDF (HKDF-SHA256 is
+the standard choice) before using it for anything, e.g.:
+
+```rust
+let shared_secret = my_identity.agree(&their_dh_public_key);
+let mut conversation_key = [0u8; 32];
+hkdf::Hkdf::<sha2::Sha256>::new(None, &shared_secret)
+    .expand(b"canopee-chat/conversation-key/v1", &mut conversation_key)
+    .expect("32 bytes is a valid HKDF output length");
+```
+
+The domain string (`b"canopee-chat/..."`) matters for the same reason
+`canopee-identity`'s own `DH_DOMAIN` constant does — it keeps this
+derivation cryptographically distinct from anything else that might ever
+derive a key from the same shared secret. Both sides compute the same
+`conversation_key` independently (X25519 agreement is symmetric — this is
+exactly what `dh_agreement_is_symmetric` in
+[`crates/canopee-identity/src/identity.rs`](../crates/canopee-identity/src/identity.rs)
+verifies), so there's nothing to exchange beyond the DH public keys from
+6a.
+
+**Design question:** compute this once and cache it, or derive it fresh
+per session? For a first version, computing it once per contact (it's
+deterministic — same two identities always produce the same
+`conversation_key`) and caching it in memory is fine. The real problem
+with that — one key, used forever, is exactly what forward secrecy exists
+to avoid — is what the stretch note below is about; don't try to solve it
+here.
+
+### 6c: encrypt before publish, decrypt after receive
+
+**Where:** the `send_message` command and the incoming-message handler
+you built in Step 4, plus wherever Step 5 constructs a message `Object`.
+
+**What to build:** an AEAD cipher (ChaCha20-Poly1305 or AES-256-GCM — both
+have mature Rust crates) keyed with 6b's `conversation_key`, with a fresh
+random nonce per message (never reuse a nonce with the same key — that's
+a real, catastrophic AEAD failure mode, not a style concern). Encrypt the
+plaintext message bytes immediately before calling
+`runtime.network.publish(topic, ciphertext)` (or before constructing the
+Step 5 message `Object`), prefixing or otherwise carrying the nonce
+alongside the ciphertext (it doesn't need to be secret, just unique).
+Decrypt symmetrically on receipt, before displaying anything in the UI.
+
+At this point, revisit Step 4's topic-naming design question: a
+per-conversation topic derived from both `IdentityId`s stops the topic
+*string* from being guessable, and encrypting the payload stops the topic
+*contents* from being readable even to someone who does guess or already
+knows it — the two mitigations are independent and you want both.
+
+**How to verify:** with two connected instances, send a message and — with
+a debugger, a temporary log line, or by subscribing to the topic from a
+third, unmodified `canopee chat` CLI instance — confirm what actually
+crosses the network is opaque ciphertext, not the plaintext you typed.
+Then confirm the real recipient still displays the decrypted plaintext
+correctly. Both checks matter: the first proves privacy, the second proves
+you didn't just break delivery.
+
+### Stretch: forward secrecy and groups
+
+6a–6c gets you real confidentiality against relays, other gossipsub
+subscribers, and cache nodes — a substantial, genuine improvement over
+everything before this step. It does **not** give you forward secrecy: a
+single `conversation_key`, derived once and reused for every message,
+means a single future key compromise exposes every past message you
+encrypted with it. Signal's Double Ratchet protocol (or a simpler
+per-message key-derivation scheme) exists specifically to bound that
+blast radius by deriving a fresh key per message from an evolving chain,
+so compromising today's key doesn't expose yesterday's messages. Building
+that — along with any form of group chat, which pairwise DH doesn't cover
+at all — is real, substantial follow-up work, out of scope for this
+tutorial to design in full. Track it as the next thing to build once
+6a–6c is working, not as something silently missing from a "done" claim.
 
 ## Summary checklist
 
@@ -322,8 +436,13 @@ as private/secure until this is solved.
       verified with real-time delivery between two instances
 - [ ] Step 5 — a documented decision (and ideally an implementation) for
       what happens to messages sent while the recipient is offline
-- [ ] Step 6 (stretch) — a plan, at minimum, for end-to-end encryption
-      before calling this production-ready
+- [ ] Step 6 — DH public keys are discoverable per contact, a shared
+      conversation key is derived via HKDF (not used directly from
+      `agree()`), and messages are AEAD-encrypted before publish/storage —
+      verified by observing ciphertext on the wire and correct plaintext
+      on receipt
+- [ ] Step 6 stretch — a plan, at minimum, for forward secrecy (ratcheting)
+      and group messaging before calling this production-ready
 
 By the end, two people should be able to install your app, exchange a
 short identity string once (in person, over text, whatever), and message

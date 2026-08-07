@@ -40,11 +40,15 @@ data for a specific recipient:
 - **Gossipsub messages are signed but not encrypted** — a relay you route
   through, or any peer subscribed to the same topic (deliberately or by
   guessing/knowing the topic string), can read message contents.
-  [`tauri-chat-app-tutorial.md`](tauri-chat-app-tutorial.md#step-6-stretch-actual-message-privacy)
-  calls this out directly: don't market a chat app built this way as
-  private or secure without solving it first (something like the
-  Signal/Double Ratchet protocol, or at minimum per-conversation symmetric
-  encryption keyed off each participant's existing identity key).
+  [`tauri-chat-app-tutorial.md`](tauri-chat-app-tutorial.md#step-6-end-to-end-message-encryption)
+  now works through building this for a 1:1 chat, on top of the X25519
+  key-agreement primitive in `canopee-identity`
+  (`Identity::dh_public_key`/`agree` — see
+  [`end-to-end-encryption.md`](end-to-end-encryption.md)). That tutorial
+  step is optional/unbuilt-by-default, not something every app gets for
+  free: don't market a chat app as private or secure unless it actually
+  implements that step (or forward secrecy on top of it — the tutorial's
+  stretch goal, still unbuilt anywhere in this codebase).
 - **`AppPointerRecord`'s `manifest` field is plaintext** in the DHT record
   — anyone resolving `(owner, name)` sees exactly which manifest id is
   current, which is fine for a public app but means there's no private
@@ -137,7 +141,11 @@ knows which owner they're looking for.
   compromised key can keep publishing indefinitely under the victim's
   established identity until the victim notices and tells their contacts
   to stop trusting that `IdentityId` — a purely social, out-of-band
-  mitigation, not a protocol-level one.
+  mitigation, not a protocol-level one. This also means there's no
+  device-scoped way to use one identity from multiple devices safely —
+  see [`multi-device-identity.md`](multi-device-identity.md), whose only
+  option today is copying the same private key to every device, with the
+  same lack of revocation and no per-device trust separation at all.
 - **The private key file is stored unencrypted on disk.**
   `Identity::create`/`load` write/read raw protobuf-encoded key bytes with
   no passphrase or OS-keychain integration
@@ -175,7 +183,7 @@ client), but it removes an entire *other* process from the equation.
 |---|---|---|
 | Object tampering/impersonation | Handled — signed, content-addressed, verified on every access | `canopee-storage` README |
 | App pointer impersonation | Handled — signature + owner-derivation check | `AppPointerRecord::verify`, `app-manifests.md` |
-| Content/message privacy | **Not handled** — signed ≠ encrypted | This doc, `tauri-chat-app-tutorial.md` Step 6 |
+| Content/message privacy | **Not handled by default** — signed ≠ encrypted; key-agreement primitive exists, and a tutorial builds on it, but no app gets this for free | This doc, [`end-to-end-encryption.md`](end-to-end-encryption.md), `tauri-chat-app-tutorial.md` Step 6 |
 | `open`'s HTTP server transport | **Not handled** — plain HTTP | `roadmap-hosting-replacement.md` |
 | Direct peer-to-peer transport | Handled — Noise-encrypted | `canopee-network` (relayed hops excepted) |
 | Bootstrap/DHT poisoning | Partial — mitigation designed, not built | `bootstrap-nodes-tutorial.md` Step 4 |

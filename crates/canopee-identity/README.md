@@ -38,6 +38,12 @@ let public_key_bytes = identity.public_key_bytes();
 
 // The full libp2p Keypair, e.g. for handing to a SwarmBuilder.
 let keypair = identity.keypair();
+
+// X25519 key agreement, for end-to-end encryption above this crate (see
+// "Key agreement (X25519)" below). Publish `dh_public_key()` however your
+// app discovers peers; it is not resolved by `IdentityId` today.
+let my_dh_public_key = identity.dh_public_key();
+let shared_secret = identity.agree(&their_dh_public_key); // run through a KDF before using as a cipher key
 ```
 
 | Type | Purpose |
@@ -54,6 +60,30 @@ the string's shape; malformed input just fails to resolve to anything later
 `Identity::create`/`Identity::load` are async only because they do file I/O
 (`tokio::fs`); the crypto itself is synchronous.
 
+## Key agreement (X25519)
+
+Signing proves who sent something; it doesn't make it private (see
+[`security-considerations.md`](../../docs/security-considerations.md)).
+`dh_public_key()`/`agree()` add the other half — a way for two identities to
+derive a shared secret, as the basis for end-to-end encryption built by
+whatever's layered on top (e.g. a chat app's session/ratchet logic). This
+crate deliberately stops at the raw shared secret:
+
+- `dh_public_key()` returns this identity's X25519 public key, derived (not
+  separately generated) from the same Ed25519 signing key via
+  `Keypair::derive_secret`, domain-separated with a fixed `canopee/dh/...`
+  string. Same signing key in ⇒ same DH keypair out, every time — nothing
+  new to persist, lose, or get out of sync with the identity file.
+- `agree(their_dh_public_key)` runs Diffie-Hellman against another
+  identity's DH public key and returns a raw `[u8; 32]`. It is *not* a
+  cipher key — run it through a KDF, mix in whatever nonce/session material
+  your protocol needs, and manage ratcheting/forward-secrecy yourself.
+  Nothing here tracks conversation or session state.
+- There's no built-in way to discover someone's `dh_public_key()` from just
+  their `IdentityId` — publishing/fetching it (as a signed object, a DHT
+  record, or anything else) is left to the caller, the same way this crate
+  doesn't prescribe how `public_key_bytes()` gets distributed either.
+
 ## Design notes
 
 - The private key is stored on disk as raw protobuf-encoded key bytes
@@ -68,6 +98,13 @@ the string's shape; malformed input just fails to resolve to anything later
   [`canopee-network`](../canopee-network) hands the same key material to a
   libp2p `SwarmBuilder` without `canopee-identity` depending on the network
   crate.
+- **Never reuse the signing key and the DH secret across purposes**, even
+  though both are derived from the same Ed25519 seed. `derive_secret`'s
+  domain separation (`canopee/dh/x25519/v1`) exists specifically so the DH
+  secret is cryptographically independent of the raw signing key — sign
+  with `sign()`, agree with `agree()`, never the other's underlying key
+  material. This is a real, well-known class of cross-protocol key-reuse
+  bugs, not a style preference.
 
 ## Testing
 
