@@ -216,9 +216,9 @@ impl CanopeeClient {
             })
             .await?
         {
-            NodeResponse::AppPointer { record: Some(record) } if record.verify() => {
-                Ok(Some(record.manifest))
-            }
+            NodeResponse::AppPointer {
+                record: Some(record),
+            } if record.verify() => Ok(Some(record.manifest)),
             NodeResponse::AppPointer { .. } => Ok(None),
             other => Err(Self::unexpected(other)),
         }

@@ -5,10 +5,7 @@ use canopee_sdk::CanopeeClient;
 /// it purely through `CanopeeClient`, the same way an app would.
 #[tokio::test]
 async fn app_uses_identity_storage_and_network_via_sdk() {
-    let home = std::env::temp_dir().join(format!(
-        "canopee_sdk_test_{}",
-        std::process::id()
-    ));
+    let home = std::env::temp_dir().join(format!("canopee_sdk_test_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir_all(&home).unwrap();
     // SAFETY: this test binary runs this single test; no other thread reads HOME concurrently.

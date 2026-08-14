@@ -88,11 +88,7 @@ pub async fn fetch_app(
     // other object instead of re-resolving a provider per asset.
     let peer = match peer {
         Some(peer) => Some(peer),
-        None => client
-            .find_providers(manifest_id)
-            .await?
-            .into_iter()
-            .next(),
+        None => client.find_providers(manifest_id).await?.into_iter().next(),
     };
 
     let entrypoint = get_or_fetch(client, &manifest.entrypoint, peer.as_deref()).await?;

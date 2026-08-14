@@ -35,7 +35,6 @@ impl Storage {
         if !object.verify() {
             anyhow::bail!("Invalid signature for object {}", id);
         }
-
         Ok(object)
     }
 

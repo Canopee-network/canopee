@@ -81,9 +81,11 @@ impl NetworkManager {
         listen_addr: Multiaddr,
         object_provider: Arc<dyn ObjectProvider>,
     ) -> anyhow::Result<Self> {
+        // create peer_id from identity...
         let keypair = identity.keypair();
         let peer_id = PeerId::from(keypair.public());
 
+        // build Swarm with relay client and behabviour
         let mut swarm = SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
             .with_tcp(
@@ -107,16 +109,14 @@ impl NetworkManager {
                     kad::Behaviour::with_config(peer_id, MemoryStore::new(peer_id), kad_config);
                 kad.set_mode(Some(kad::Mode::Server));
 
-                let object_exchange = request_response::cbor::Behaviour::<
-                    ObjectRequest,
-                    ObjectResponse,
-                >::new(
-                    [(
-                        StreamProtocol::new("/canopee/objects/1.0.0"),
-                        ProtocolSupport::Full,
-                    )],
-                    request_response::Config::default(),
-                );
+                let object_exchange =
+                    request_response::cbor::Behaviour::<ObjectRequest, ObjectResponse>::new(
+                        [(
+                            StreamProtocol::new("/canopee/objects/1.0.0"),
+                            ProtocolSupport::Full,
+                        )],
+                        request_response::Config::default(),
+                    );
 
                 let ping = ping::Behaviour::new(ping::Config::default());
 
@@ -149,11 +149,18 @@ impl NetworkManager {
             .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(60)))
             .build();
 
+        // smarm listener...
         swarm.listen_on(listen_addr)?;
 
+        // start listener loop and spawn processes...
         let (tx, rx) = mpsc::channel(64);
         let (pubsub_tx, _) = broadcast::channel(256);
-        tokio::spawn(run_event_loop(swarm, rx, object_provider, pubsub_tx.clone()));
+        tokio::spawn(run_event_loop(
+            swarm,
+            rx,
+            object_provider,
+            pubsub_tx.clone(),
+        ));
 
         Ok(Self {
             commands: tx,
@@ -248,7 +255,10 @@ impl NetworkManager {
 
     /// Subscribes to a gossipsub topic and returns a receiver for messages on
     /// any subscribed topic. Filter on `PubSubMessage::topic` if subscribed to more than one.
-    pub async fn subscribe(&self, topic: &str) -> anyhow::Result<broadcast::Receiver<PubSubMessage>> {
+    pub async fn subscribe(
+        &self,
+        topic: &str,
+    ) -> anyhow::Result<broadcast::Receiver<PubSubMessage>> {
         let (reply, rx) = oneshot::channel();
         self.commands
             .send(Command::Subscribe(topic.to_string(), reply))
@@ -372,7 +382,11 @@ fn handle_command(
         }
         Command::PutRecord { key, value, reply } => {
             let record = kad::Record::new(kad::RecordKey::new(&key), value);
-            match swarm.behaviour_mut().kad.put_record(record, kad::Quorum::One) {
+            match swarm
+                .behaviour_mut()
+                .kad
+                .put_record(record, kad::Quorum::One)
+            {
                 Ok(query_id) => {
                     pending_put_record.insert(query_id, reply);
                 }
@@ -465,7 +479,10 @@ async fn handle_swarm_event(
         }
         SwarmEvent::Behaviour(CanopeeBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
             for (peer_id, addr) in list {
-                swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
+                swarm
+                    .behaviour_mut()
+                    .kad
+                    .add_address(&peer_id, addr.clone());
                 if let Err(e) = swarm.dial(addr) {
                     tracing::debug!("Failed to dial mDNS peer {peer_id}: {e}");
                 }
@@ -477,7 +494,10 @@ async fn handle_swarm_event(
             ..
         })) => {
             for addr in &info.listen_addrs {
-                swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
+                swarm
+                    .behaviour_mut()
+                    .kad
+                    .add_address(&peer_id, addr.clone());
             }
             let peer = peers.entry(peer_id).or_insert_with(|| Peer::new(peer_id));
             peer.addresses = info.listen_addrs;
@@ -524,17 +544,13 @@ async fn handle_swarm_event(
                 src_peer_id,
                 dst_peer_id,
             } => {
-                tracing::info!(
-                    "Relay: peer {src_peer_id} dialed peer {dst_peer_id} through us"
-                );
+                tracing::info!("Relay: peer {src_peer_id} dialed peer {dst_peer_id} through us");
             }
             relay::Event::CircuitReqDenied {
                 src_peer_id,
                 dst_peer_id,
             } => {
-                tracing::warn!(
-                    "Relay: denied circuit request from {src_peer_id} to {dst_peer_id}"
-                );
+                tracing::warn!("Relay: denied circuit request from {src_peer_id} to {dst_peer_id}");
             }
             relay::Event::CircuitClosed {
                 src_peer_id,
@@ -551,9 +567,10 @@ async fn handle_swarm_event(
             }
             _ => {}
         },
-        SwarmEvent::Behaviour(CanopeeBehaviourEvent::Autonat(
-            autonat::Event::StatusChanged { old, new },
-        )) => {
+        SwarmEvent::Behaviour(CanopeeBehaviourEvent::Autonat(autonat::Event::StatusChanged {
+            old,
+            new,
+        })) => {
             tracing::info!("NAT status changed: {old:?} -> {new:?}");
         }
         SwarmEvent::Behaviour(CanopeeBehaviourEvent::Dcutr(event)) => {

@@ -31,12 +31,8 @@ impl AppPointerRecord {
     pub fn sign(identity: &Identity, name: &str, manifest: ObjectId) -> anyhow::Result<Self> {
         let owner = identity.id().clone();
         let published_at = OffsetDateTime::now_utc().unix_timestamp() as u64;
-        let signature = identity.sign(&Self::signing_bytes(
-            name,
-            &owner,
-            &manifest,
-            published_at,
-        ))?;
+        let signature =
+            identity.sign(&Self::signing_bytes(name, &owner, &manifest, published_at))?;
 
         Ok(Self {
             name: name.to_string(),
@@ -102,8 +98,8 @@ mod tests {
             .await
             .unwrap();
         let manifest = ObjectId::new("manifest-1");
-        let record = AppPointerRecord::sign(&identity, "alice-portfolio", manifest.clone())
-            .unwrap();
+        let record =
+            AppPointerRecord::sign(&identity, "alice-portfolio", manifest.clone()).unwrap();
 
         assert!(record.verify());
         assert_eq!(record.manifest, manifest);
