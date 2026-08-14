@@ -31,19 +31,29 @@ impl ObjectProvider for StorageObjectProvider {
 
 impl Runtime {
     pub async fn open() -> anyhow::Result<Self> {
+        // init configs...
         let config = Config::new();
+
+        // init home root directory...
         let root = config.home_dir();
         tokio::fs::create_dir_all(&root).await?;
+
+        // init identity root directory...
         let identity_dir = config.identity_path();
         tokio::fs::create_dir_all(&identity_dir).await?;
+
+        // load or create root identity cryptographic key...
         let identity_path = identity_dir.join("identity.key");
         let identity = match Identity::load(identity_path.to_str().unwrap()).await {
             Ok(id) => id,
             Err(_) => Identity::create(identity_path.to_str().unwrap()).await?,
         };
+
+        // init or use state root directory...
         let state_path = config.state_path();
         tokio::fs::create_dir_all(state_path.parent().unwrap()).await?;
 
+        // load or initialize new Node state...
         let state = match tokio::fs::read(&state_path).await {
             Ok(bytes) => bincode::deserialize(&bytes)?,
             Err(_) => {
@@ -61,15 +71,21 @@ impl Runtime {
                 state
             }
         };
+
+        // init storage roor directory...
         let storage_path = config.storage_path();
         tokio::fs::create_dir_all(&storage_path).await?;
+
         let storage = Arc::new(Storage::new(storage_path.to_str().unwrap()));
         let identity = Arc::new(identity);
 
+        // init Runtime connection listener...
         let listen_addr: Multiaddr = config.listen_addr().parse()?;
         let object_provider = Arc::new(StorageObjectProvider {
             storage: storage.clone(),
         });
+
+        // init Noetwork node...
         let network = NetworkManager::new(identity.clone(), listen_addr, object_provider)?;
 
         Ok(Self {
@@ -163,6 +179,7 @@ impl Runtime {
     }
 
     pub async fn get(&self, id: &ObjectId) -> anyhow::Result<Object> {
+        println!("GET IS CALLED HERE");
         let object = self.storage.get_verified(id).await?;
 
         Ok(object)

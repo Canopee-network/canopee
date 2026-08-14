@@ -343,6 +343,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "canopee-contact"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "canopee-identity",
+ "canopee-storage",
+ "serde",
+]
+
+[[package]]
 name = "canopee-identity"
 version = "0.1.0"
 dependencies = [

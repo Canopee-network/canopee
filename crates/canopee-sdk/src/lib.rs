@@ -8,4 +8,6 @@ pub use subscription::Subscription;
 
 pub use canopee_identity::IdentityId;
 pub use canopee_protocol::{PeerInfo, PubSubMessage};
-pub use canopee_storage::{AppManifest, AppPointerRecord, ExportBundle, Object, ObjectId, ObjectInfo};
+pub use canopee_storage::{
+    AppManifest, AppPointerRecord, ExportBundle, Object, ObjectId, ObjectInfo,
+};

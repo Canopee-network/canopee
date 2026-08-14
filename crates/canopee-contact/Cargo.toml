@@ -1,0 +1,11 @@
+[package]
+name = "canopee-contact"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+bincode = "1"
+serde = { version = "1", features = ["derive"] }
+canopee-identity = { path = "../canopee-identity" }
+canopee-storage = { path = "../canopee-storage" }

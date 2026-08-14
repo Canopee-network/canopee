@@ -41,6 +41,7 @@ pub enum ObjectType {
     /// the same name lets fetchers resolve the newest version instead of
     /// being stuck with whatever manifest id they first saw.
     AppPointer,
+    ContactCard,
     // Profile,
     // Message,
     // ...
