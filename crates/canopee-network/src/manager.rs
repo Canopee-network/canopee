@@ -31,6 +31,68 @@ fn relay_peer_id_from_circuit_addr(addr: &Multiaddr) -> Option<PeerId> {
     None
 }
 
+/// Default bootstrap relay addresses. New nodes dial these on startup to get
+/// their first Kademlia routing-table entries, after which normal DHT
+/// discovery takes over.
+const DEFAULT_BOOTSTRAP_ADDRS: &[&str] =
+    &["/ip4/89.127.234.35/tcp/4001/p2p/12D3KooWGiPk75fg8HBW7WJCouTTTLNi8W3s48sBK8AKewZKbCjC"];
+
+/// Returns the list of bootstrap multiaddrs to dial at startup.
+///
+/// If `CANOPEE_BOOTSTRAP_ADDRS` is set, its comma-separated values are used
+/// *instead of* the defaults. If `CANOPEE_BOOTSTRAP_ADDRS_PREPEND` is set to
+/// `1`, the env-var values are *prepended* to the defaults rather than
+/// replacing them.
+fn bootstrap_addrs() -> Vec<Multiaddr> {
+    let env_val = std::env::var("CANOPEE_BOOTSTRAP_ADDRS").ok();
+    let prepend = std::env::var("CANOPEE_BOOTSTRAP_ADDRS_PREPEND")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+
+    let env_addrs: Vec<Multiaddr> = env_val
+        .as_deref()
+        .map(|v| {
+            v.split(',')
+                .filter_map(|s| {
+                    let s = s.trim();
+                    if s.is_empty() {
+                        return None;
+                    }
+                    match s.parse::<Multiaddr>() {
+                        Ok(a) => Some(a),
+                        Err(e) => {
+                            tracing::warn!("Ignoring invalid bootstrap addr '{s}': {e}");
+                            None
+                        }
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let default_addrs: Vec<Multiaddr> = DEFAULT_BOOTSTRAP_ADDRS
+        .iter()
+        .filter_map(|s| {
+            s.parse::<Multiaddr>()
+                .map_err(|e| {
+                    tracing::error!("Invalid default bootstrap addr '{s}': {e}");
+                    e
+                })
+                .ok()
+        })
+        .collect();
+
+    if prepend {
+        let mut addrs = env_addrs;
+        addrs.extend(default_addrs);
+        addrs
+    } else if env_val.is_some() {
+        env_addrs
+    } else {
+        default_addrs
+    }
+}
+
 #[async_trait::async_trait]
 pub trait ObjectProvider: Send + Sync + 'static {
     async fn get_object(&self, id: &ObjectId) -> Option<ExportBundle>;
@@ -151,6 +213,17 @@ impl NetworkManager {
 
         // smarm listener...
         swarm.listen_on(listen_addr)?;
+
+        // dial bootstrap nodes so a fresh node gets its first routing-table entries
+        let bootstrap = bootstrap_addrs();
+        if !bootstrap.is_empty() {
+            tracing::info!("Dialing {} bootstrap address(es)", bootstrap.len());
+        }
+        for addr in bootstrap {
+            if let Err(e) = swarm.dial(addr.clone()) {
+                tracing::warn!("Failed to dial bootstrap {addr}: {e}");
+            }
+        }
 
         // start listener loop and spawn processes...
         let (tx, rx) = mpsc::channel(64);
