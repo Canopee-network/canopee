@@ -54,6 +54,25 @@ enum Commands {
     FindProviders {
         id: String,
     },
+    /// Fetches an object from a specific peer and imports it locally.
+    Fetch {
+        peer_id: String,
+        id: String,
+    },
+    /// Shares a stored object under a name: upserts a `shared: true` entry in
+    /// your home index and announces the object on the DHT, so any peer can
+    /// discover and fetch it.
+    Share {
+        name: String,
+        id: String,
+    },
+    /// Stops sharing the home entry `<name>`: the object is withdrawn from
+    /// the DHT and no longer served to peers.
+    Unshare {
+        name: String,
+    },
+    /// Lists the entries in your home index (name, object id, shared flag).
+    Home,
     Publish {
         topic: String,
         message: String,
@@ -432,6 +451,69 @@ async fn main() {
                 NodeResponse::Published => println!("Published"),
                 NodeResponse::Error { message } => eprintln!("Error: {}", message),
                 _ => {}
+            }
+        }
+
+        Commands::Fetch { peer_id, id } => {
+            let client = CanopeeClient::connect().await.unwrap();
+            match client.fetch_object(peer_id, ObjectId::new(&id)).await {
+                Ok(bundle) => {
+                    // Import so the object is stored (and re-served as cache).
+                    client.import(bundle).await.unwrap();
+                    println!("Fetched and imported {}", id);
+                }
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Commands::Share { name, id } => {
+            let client = CanopeeClient::connect().await.unwrap();
+            match client
+                .share_object(name.clone(), ObjectId::new(&id), Some("cli".into()))
+                .await
+            {
+                Ok(_) => println!("Shared \"{}\" ({})", name, id),
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Commands::Unshare { name } => {
+            let client = CanopeeClient::connect().await.unwrap();
+            match client.unshare(name.clone()).await {
+                Ok(_) => println!("Unshared \"{}\"", name),
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Commands::Home => {
+            let client = CanopeeClient::connect().await.unwrap();
+            match client.load_home_index().await {
+                Ok(Some(index)) => {
+                    if index.entries.is_empty() {
+                        println!("Home index is empty");
+                    }
+                    for entry in index.entries {
+                        println!(
+                            "{}\n  Object: {}\n  Type: {:?}\n  Shared: {}\n  App: {}",
+                            entry.name,
+                            entry.object,
+                            entry.object_type,
+                            if entry.shared { "yes" } else { "no" },
+                            entry.app.as_deref().unwrap_or("-"),
+                        );
+                    }
+                }
+                Ok(None) => println!("No home index yet"),
+                Err(e) => eprintln!("Error: {}", e),
             }
         }
 

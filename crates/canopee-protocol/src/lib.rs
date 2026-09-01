@@ -1,5 +1,8 @@
 use canopee_identity::IdentityId;
-use canopee_storage::{AppPointerRecord, ExportBundle, Object, ObjectId, ObjectInfo, ObjectType};
+use canopee_storage::{
+    AppPointerRecord, ContactList, ExportBundle, HomeIndex, Object, ObjectId, ObjectInfo,
+    ObjectType, Profile,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -87,6 +90,36 @@ pub enum NodeCommand {
         owner: IdentityId,
         name: String,
     },
+    /// Signs and publishes a user record (`(owner, name)` → `ObjectId`) via
+    /// the Runtime's cache-aware pointer layer.
+    PublishPointer {
+        name: String,
+        target: ObjectId,
+    },
+    /// Resolves a user record the Runtime way: checks the local record cache
+    /// first, then the DHT, verifying owner + signature.
+    ResolvePointer {
+        owner: IdentityId,
+        name: String,
+    },
+    /// Stores a new `Profile` version and repoints `(owner, "profile")`.
+    SaveProfile { profile: Profile },
+    /// Loads the current `Profile` from the local shared store.
+    LoadProfile,
+    /// Stores a new `ContactList` version and repoints `(owner, "contacts")`.
+    SaveContactList { list: ContactList },
+    /// Loads the current `ContactList` from the local shared store.
+    LoadContactList,
+    /// Stores a new `HomeIndex` version and repoints `(owner, "home")`.
+    SaveHomeIndex { index: HomeIndex },
+    /// Loads the current `HomeIndex` from the local shared store.
+    LoadHomeIndex,
+    /// Flips one home entry's `shared` flag (the explicit "share this on the
+    /// network" / "stop sharing" action) and republishes the index.
+    SetHomeEntryShared { name: String, shared: bool },
+    /// Shares a stored object under `name`: upserts a `shared: true` home
+    /// entry and announces the object as a DHT provider.
+    ShareObject { name: String, object: ObjectId, app: Option<String> },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -136,5 +169,27 @@ pub enum NodeResponse {
     AppPointerPublished,
     AppPointer {
         record: Option<AppPointerRecord>,
+    },
+    PointerPublished,
+    Pointer {
+        record: Option<AppPointerRecord>,
+    },
+    ProfileSaved {
+        id: ObjectId,
+    },
+    Profile {
+        profile: Option<Profile>,
+    },
+    ContactListSaved {
+        id: ObjectId,
+    },
+    ContactList {
+        list: Option<ContactList>,
+    },
+    HomeIndexSaved {
+        id: ObjectId,
+    },
+    HomeIndex {
+        index: Option<HomeIndex>,
     },
 }

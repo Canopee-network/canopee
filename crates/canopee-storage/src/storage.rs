@@ -23,8 +23,14 @@ impl Storage {
             anyhow::bail!("Invalid signature for object {}", object.id);
         }
         let path = format!("{}/{}", self.root, object.id.0);
+        // Write to a temp name then rename, so a concurrent writer (multiple
+        // apps sharing one *user* store) can never leave a torn file behind.
+        // Object ids are content-addressed, so every writer of a given id
+        // writes identical bytes and concurrent renames are idempotent.
+        let tmp = format!("{}/.{}.canopee-tmp", self.root, object.id.0);
         let bytes = bincode::serialize(object)?;
-        fs::write(path, bytes).await?;
+        fs::write(&tmp, bytes).await?;
+        fs::rename(&tmp, path).await?;
         Ok(())
     }
 
@@ -48,6 +54,11 @@ impl Storage {
         let mut entries = fs::read_dir(&self.root).await?;
         while let Some(entry) = entries.next_entry().await? {
             let filename = entry.file_name().to_string_lossy().to_string();
+            // Skip temp files and the record cache, which share the same
+            // user-root layout.
+            if filename.starts_with('.') {
+                continue;
+            }
             objects.push(ObjectId::new(&filename));
         }
         Ok(objects)
@@ -57,8 +68,18 @@ impl Storage {
         let mut objects = Vec::new();
         let mut entries = fs::read_dir(&self.root).await?;
         while let Some(entry) = entries.next_entry().await? {
+            let filename = entry.file_name().to_string_lossy().to_string();
+            if filename.starts_with('.') {
+                continue;
+            }
             let bytes = fs::read(entry.path()).await?;
-            let object = bincode::deserialize::<Object>(&bytes)?;
+            // A file that fails to decode is treated as absent rather than
+            // failing the whole listing — protects concurrent writers in a
+            // shared user store from transiently breaking every other app's
+            // "my data" view.
+            let Ok(object) = bincode::deserialize::<Object>(&bytes) else {
+                continue;
+            };
             let verified = object.verify();
             let object_info = ObjectInfo {
                 id: object.id,

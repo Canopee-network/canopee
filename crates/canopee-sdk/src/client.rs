@@ -2,7 +2,10 @@ use crate::node_client::NodeClient;
 use crate::subscription::Subscription;
 use canopee_identity::IdentityId;
 use canopee_protocol::{NodeCommand, NodeResponse, PeerInfo, RelayReservationInfo};
-use canopee_storage::{ExportBundle, Object, ObjectId, ObjectInfo, ObjectType};
+use canopee_storage::{
+    AppPointerRecord, ContactList, ExportBundle, HomeIndex, Object, ObjectId, ObjectInfo,
+    ObjectType, Profile,
+};
 /// Entry point for apps that want to use a Canopee node's identity, storage,
 /// and network capabilities. Talks to the locally running node over its Unix
 /// socket; the node itself owns the identity keys, object storage, and the
@@ -222,6 +225,160 @@ impl CanopeeClient {
             NodeResponse::AppPointer { .. } => Ok(None),
             other => Err(Self::unexpected(other)),
         }
+    }
+
+    /// Signs and publishes a user record `(owner, name)` → `ObjectId`, using
+    /// the Runtime's cache-aware pointer layer (local record cache + DHT).
+    pub async fn publish_pointer(
+        &self,
+        name: impl Into<String>,
+        target: ObjectId,
+    ) -> anyhow::Result<()> {
+        match self
+            .request(NodeCommand::PublishPointer {
+                name: name.into(),
+                target,
+            })
+            .await?
+        {
+            NodeResponse::PointerPublished => Ok(()),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Resolves a `(owner, name)` user record through the Runtime's
+    /// cache-aware pointer layer. Returns the latest verified
+    /// `AppPointerRecord`, or `None` if nothing verifiable is found.
+    pub async fn resolve_pointer(
+        &self,
+        owner: IdentityId,
+        name: impl Into<String>,
+    ) -> anyhow::Result<Option<AppPointerRecord>> {
+        match self
+            .request(NodeCommand::ResolvePointer {
+                owner,
+                name: name.into(),
+            })
+            .await?
+        {
+            NodeResponse::Pointer { record } => Ok(record),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Stores a new `Profile` version and repoints the node's
+    /// `(owner, "profile")` record at it. Returns the new object id.
+    pub async fn save_profile(&self, profile: &Profile) -> anyhow::Result<ObjectId> {
+        match self
+            .request(NodeCommand::SaveProfile {
+                profile: profile.clone(),
+            })
+            .await?
+        {
+            NodeResponse::ProfileSaved { id } => Ok(id),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Loads the node's latest `Profile` from the shared store.
+    pub async fn load_profile(&self) -> anyhow::Result<Option<Profile>> {
+        match self.request(NodeCommand::LoadProfile).await? {
+            NodeResponse::Profile { profile } => Ok(profile),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Stores a new `ContactList` snapshot and repoints the node's
+    /// `(owner, "contacts")` record at it. Returns the new object id.
+    pub async fn save_contact_list(&self, list: &ContactList) -> anyhow::Result<ObjectId> {
+        match self
+            .request(NodeCommand::SaveContactList {
+                list: list.clone(),
+            })
+            .await?
+        {
+            NodeResponse::ContactListSaved { id } => Ok(id),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Loads the node's latest `ContactList` from the shared store.
+    pub async fn load_contact_list(&self) -> anyhow::Result<Option<ContactList>> {
+        match self.request(NodeCommand::LoadContactList).await? {
+            NodeResponse::ContactList { list } => Ok(list),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Stores a new `HomeIndex` version and repoints the node's
+    /// `(owner, "home")` record at it. Returns the new object id.
+    pub async fn save_home_index(&self, index: &HomeIndex) -> anyhow::Result<ObjectId> {
+        match self
+            .request(NodeCommand::SaveHomeIndex {
+                index: index.clone(),
+            })
+            .await?
+        {
+            NodeResponse::HomeIndexSaved { id } => Ok(id),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Loads the node's latest `HomeIndex` from the shared store.
+    pub async fn load_home_index(&self) -> anyhow::Result<Option<HomeIndex>> {
+        match self.request(NodeCommand::LoadHomeIndex).await? {
+            NodeResponse::HomeIndex { index } => Ok(index),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Flips one home entry's `shared` flag — the explicit "share this on the
+    /// network" / "stop sharing" action. Sharing announces the entry's object
+    /// as a DHT provider and starts serving it; unsharing withdraws both.
+    /// Returns the new index object id.
+    pub async fn set_home_entry_shared(
+        &self,
+        name: impl Into<String>,
+        shared: bool,
+    ) -> anyhow::Result<ObjectId> {
+        match self
+            .request(NodeCommand::SetHomeEntryShared {
+                name: name.into(),
+                shared,
+            })
+            .await?
+        {
+            NodeResponse::HomeIndexSaved { id } => Ok(id),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Shares a stored object under `name`: upserts a `shared: true` home
+    /// entry (creating the index on first use) and announces the object as a
+    /// DHT provider. The one-call "put this file on the network" action.
+    pub async fn share_object(
+        &self,
+        name: impl Into<String>,
+        object: ObjectId,
+        app: Option<String>,
+    ) -> anyhow::Result<ObjectId> {
+        match self
+            .request(NodeCommand::ShareObject {
+                name: name.into(),
+                object,
+                app,
+            })
+            .await?
+        {
+            NodeResponse::HomeIndexSaved { id } => Ok(id),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Stops sharing the home entry named `name` (announces withdrawn, object
+    /// no longer served). Shorthand for `set_home_entry_shared(name, false)`.
+    pub async fn unshare(&self, name: impl Into<String>) -> anyhow::Result<ObjectId> {
+        self.set_home_entry_shared(name, false).await
     }
 
     /// Fetches an object directly from a specific peer (typically one found

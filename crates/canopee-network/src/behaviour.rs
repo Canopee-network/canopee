@@ -1,6 +1,7 @@
 use crate::message::{ObjectRequest, ObjectResponse};
 use libp2p::{
     autonat, dcutr, gossipsub, identify, kad, mdns, ping, relay, request_response,
+    swarm::behaviour::toggle::Toggle,
     swarm::NetworkBehaviour,
 };
 
@@ -15,7 +16,12 @@ pub struct CanopeeBehaviour {
     pub kad: kad::Behaviour<kad::store::MemoryStore>,
     pub object_exchange: ObjectExchange,
     pub ping: ping::Behaviour,
-    pub mdns: mdns::tokio::Behaviour,
+    /// Disabled when a `NetworkManager` is created with `mdns: false` (the
+    /// embedded-app default): a shared identity should never be *announced*
+    /// over mDNS, or a second app's swarm writing the same `PeerId` would
+    /// fight the first. Disabled toggles still own the socket but never
+    /// poll, so they neither discover nor are discovered.
+    pub mdns: Toggle<mdns::tokio::Behaviour>,
     pub gossipsub: gossipsub::Behaviour,
     pub relay: relay::Behaviour,
     pub relay_client: relay::client::Behaviour,

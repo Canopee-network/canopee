@@ -1,0 +1,13 @@
+[package]
+name = "canopee-e2e"
+version = "0.1.0"
+edition = "2024"
+
+# End-to-end harness: drives the real `canopee-node` and `canopee` binaries
+# as separate processes, each with its own isolated $HOME, and asserts
+# cross-node behavior over the real network stack (mDNS discovery, DHT
+# announce/find-providers, object exchange, and the sharing gate).
+#
+# The crate has no library code; everything lives in `tests/e2e.rs`.
+
+[dependencies]

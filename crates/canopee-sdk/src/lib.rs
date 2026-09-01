@@ -9,5 +9,7 @@ pub use subscription::Subscription;
 pub use canopee_identity::IdentityId;
 pub use canopee_protocol::{PeerInfo, PubSubMessage};
 pub use canopee_storage::{
-    AppManifest, AppPointerRecord, ExportBundle, Object, ObjectId, ObjectInfo,
+    AppManifest, AppPointerRecord, Contact, ContactList, ExportBundle, HomeEntry, HomeIndex,
+    Object, ObjectId, ObjectInfo, ObjectType, Profile, RECORD_CONTACTS, RECORD_HOME,
+    RECORD_PROFILE,
 };

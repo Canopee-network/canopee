@@ -1,5 +1,5 @@
 use canopee_node::Node;
-use canopee_sdk::CanopeeClient;
+use canopee_sdk::{CanopeeClient, Contact, ContactList, HomeEntry, HomeIndex, ObjectType, Profile};
 
 /// Spins up a real node (in-process) bound to a scratch `$HOME`, then drives
 /// it purely through `CanopeeClient`, the same way an app would.
@@ -55,6 +55,80 @@ async fn app_uses_identity_storage_and_network_via_sdk() {
     assert_eq!(subscription.topic(), "app-topic");
     // Nothing published on this topic reaches us before we drop the subscription.
     drop(subscription);
+
+    // ---- user records over the socket ----
+
+    // Generic pointer round-trip through the cache-aware Runtime layer.
+    client.publish_pointer("app:demo", id.clone()).await.unwrap();
+    let record = client
+        .resolve_pointer(identity.clone(), "app:demo")
+        .await
+        .unwrap()
+        .expect("a just-published pointer must resolve");
+    assert_eq!(record.manifest, id);
+    assert!(record.verify());
+
+    // Profile: absent until saved, then round-trips with server-side
+    // version bumping.
+    assert!(client.load_profile().await.unwrap().is_none());
+    let profile = Profile {
+        display_name: "alice".into(),
+        dh_public_key: [7u8; 32],
+        avatar: None,
+        version: 0,
+    };
+    client.save_profile(&profile).await.unwrap();
+    let loaded = client.load_profile().await.unwrap().unwrap();
+    assert_eq!(loaded.display_name, "alice");
+    assert_eq!(loaded.version, 1);
+    client.save_profile(&profile).await.unwrap();
+    assert_eq!(client.load_profile().await.unwrap().unwrap().version, 2);
+
+    // Contact list.
+    assert!(client.load_contact_list().await.unwrap().is_none());
+    let list = ContactList {
+        contacts: vec![Contact {
+            name: "bob".into(),
+            peer_id: "12D3KooB".into(),
+            dh_public_key: [9u8; 32],
+            note: None,
+        }],
+        version: 0,
+    };
+    client.save_contact_list(&list).await.unwrap();
+    let loaded = client.load_contact_list().await.unwrap().unwrap();
+    assert_eq!(loaded.contacts[0].name, "bob");
+    assert_eq!(loaded.version, 1);
+
+    // Home index + the explicit share action.
+    let pic = client
+        .put_object(b"png bytes".to_vec(), ObjectType::Blob)
+        .await
+        .unwrap();
+    let index = HomeIndex {
+        profile: None,
+        contacts: None,
+        entries: vec![HomeEntry {
+            name: "pic.png".into(),
+            object: pic.clone(),
+            object_type: ObjectType::Blob,
+            shared: false,
+            app: Some("sdk-test".into()),
+        }],
+        version: 0,
+    };
+    client.save_home_index(&index).await.unwrap();
+    let loaded = client.load_home_index().await.unwrap().unwrap();
+    assert_eq!(loaded.entries.len(), 1);
+    assert!(!loaded.entries[0].shared);
+
+    client.set_home_entry_shared("pic.png", true).await.unwrap();
+    let loaded = client.load_home_index().await.unwrap().unwrap();
+    assert!(loaded.entries[0].shared);
+    assert!(
+        client.set_home_entry_shared("missing", true).await.is_err(),
+        "sharing an unknown entry must fail"
+    );
 
     let _ = client.shutdown().await;
 }

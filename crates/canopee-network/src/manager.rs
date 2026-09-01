@@ -140,10 +140,19 @@ pub struct NetworkManager {
 }
 
 impl NetworkManager {
+    /// Builds a swarm for `identity`. `listen_addr` is where the swarm binds
+    /// (use `/ip4/0.0.0.0/tcp/0` for an OS-assigned port); `object_provider`
+    /// serves this node's stored objects to other peers.
+    ///
+    /// `mdns` controls multicast discovery. Keep it on for a standalone node;
+    /// embedded apps that share one identity with other apps should pass
+    /// `false` so a second app's swarm never re-announces the same `PeerId`
+    /// over mDNS (they still find each other via Kademlia/bootstrap + dialing).
     pub fn new(
         identity: Arc<Identity>,
         listen_addr: Multiaddr,
         object_provider: Arc<dyn ObjectProvider>,
+        mdns: bool,
     ) -> anyhow::Result<Self> {
         // create peer_id from identity...
         let keypair = identity.keypair();
@@ -184,8 +193,16 @@ impl NetworkManager {
 
                 let ping = ping::Behaviour::new(ping::Config::default());
 
-                let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id)
-                    .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(e.to_string()))?;
+                let mdns = if mdns {
+                    Some(
+                        mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id).map_err(
+                            |e| Box::<dyn std::error::Error + Send + Sync>::from(e.to_string()),
+                        )?,
+                    )
+                } else {
+                    None
+                };
+                let mdns = libp2p::swarm::behaviour::toggle::Toggle::from(mdns);
 
                 let gossipsub = gossipsub::Behaviour::new(
                     gossipsub::MessageAuthenticity::Signed(key.clone()),

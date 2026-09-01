@@ -44,6 +44,22 @@ pub enum ObjectType {
     // Profile,
     // Message,
     // ...
+    //
+    // New variants below are appended (never reordered) so previously
+    // published objects keep their bincode variant tags.
+    /// A user's self-description object: display name, X25519 DH public key,
+    /// optional avatar object id. Signed by the identity it describes; the
+    /// latest version is pointed to by the `(owner, "profile")` record.
+    Profile,
+    /// A signed snapshot of a user's contact list. Objects are immutable, so
+    /// editing means publishing a new snapshot and repointing the
+    /// `(owner, "contacts")` record at it.
+    ContactList,
+    /// A signed index of a user's data: profile and contact-list object ids
+    /// plus named entries (files, pictures...) mapped to objects, with an
+    /// explicit per-entry `shared` flag. The entry point for "my data,
+    /// across apps and devices", pointed to by `(owner, "home")`.
+    HomeIndex,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

@@ -116,9 +116,55 @@ impl Identity {
         Ok(Self::from_keypair(signing_key))
     }
 
+    /// Loads the identity at `path`, creating a fresh one only if none exists.
+    ///
+    /// Exists for shared-user-root configurations where several apps may
+    /// race to be first: the key file is created with `create_new`, so at
+    /// most one writer wins and every loser ends up loading (after a retry
+    /// window, since the winner may still be flushing bytes) the same key.
+    /// This is the "one identity per person" guarantee — no app can silently
+    /// invent a second identity for the same user root.
+    pub async fn create_if_absent(path: &str) -> Result<Self> {
+        use std::io::ErrorKind;
+        use tokio::io::AsyncWriteExt;
+
+        let signing_key = Keypair::generate_ed25519();
+        let bytes = signing_key.to_protobuf_encoding()?;
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .await
+        {
+            Ok(mut file) => {
+                file.write_all(&bytes).await?;
+                file.sync_all().await?;
+                Ok(Self::from_keypair(signing_key))
+            }
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                // Another process/thread created the key while we were racing.
+                // Give the winner a moment to finish writing, then adopt the
+                // same identity. Each failed read is "not ready yet" — the
+                // file exists before its bytes are flushed.
+                for attempt in 0..25 {
+                    match Self::load(path).await {
+                        Ok(identity) => return Ok(identity),
+                        Err(_) if attempt < 24 => {
+                            tokio::time::sleep(std::time::Duration::from_millis(20)).await
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                unreachable!()
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
     pub async fn load(path: &str) -> Result<Self> {
         let bytes = fs::read(path).await?;
-        let signing_key = Keypair::from_protobuf_encoding(&bytes).expect("invalid keypair file");
+        let signing_key = Keypair::from_protobuf_encoding(&bytes)
+            .map_err(|e| anyhow::anyhow!("invalid keypair file: {e}"))?;
         Ok(Self::from_keypair(signing_key))
     }
 
@@ -261,6 +307,40 @@ fn derive_dh_secret(signing_key: &Keypair) -> DhSecret {
         .derive_secret(DH_DOMAIN)
         .expect("derive_secret is supported for ed25519 keys");
     DhSecret::from(seed)
+}
+
+#[tokio::test]
+async fn create_if_absent_makes_one_identity_per_path() {
+    let path = "./create_if_absent.key";
+    let _ = std::fs::remove_file(path);
+
+    let first = Identity::create_if_absent(path).await.unwrap();
+    assert_eq!(first.id().to_string(), format!("canopee://identity/{}", first.keypair().public().to_peer_id()));
+
+    // A second call must adopt the existing key, never mint a new one.
+    let second = Identity::create_if_absent(path).await.unwrap();
+    assert_eq!(first.id(), second.id());
+    assert_eq!(first.dh_public_key(), second.dh_public_key());
+}
+
+#[tokio::test]
+async fn create_if_absent_survives_concurrent_first_run() {
+    let path = "./create_if_absent_race.key";
+    let _ = std::fs::remove_file(path);
+
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let path = path.to_string();
+        handles.push(tokio::spawn(async move {
+            Identity::create_if_absent(&path).await.unwrap().id().clone()
+        }));
+    }
+    let mut ids: Vec<_> = Vec::new();
+    for h in handles {
+        ids.push(h.await.unwrap());
+    }
+    ids.dedup();
+    assert_eq!(ids.len(), 1, "all racers must converge on one identity");
 }
 
 #[tokio::test]

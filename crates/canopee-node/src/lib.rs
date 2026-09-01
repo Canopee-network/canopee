@@ -347,7 +347,7 @@ impl Node {
                 },
             },
 
-            NodeCommand::Announce { id } => match self.runtime.network.announce(id).await {
+            NodeCommand::Announce { id } => match self.runtime.announce(id).await {
                 Ok(_) => NodeResponse::Announced,
                 Err(e) => NodeResponse::Error {
                     message: e.to_string(),
@@ -395,6 +395,92 @@ impl Node {
                         },
                     },
                     Ok(None) => NodeResponse::AppPointer { record: None },
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+
+            // ---- user records (cache-aware Runtime layer) ----
+
+            NodeCommand::PublishPointer { name, target } => {
+                match self.runtime.publish_pointer(&name, target).await {
+                    Ok(()) => NodeResponse::PointerPublished,
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+
+            NodeCommand::ResolvePointer { owner, name } => {
+                match self.runtime.resolve_pointer(&owner, &name).await {
+                    Ok(record) => NodeResponse::Pointer { record },
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+
+            NodeCommand::SaveProfile { profile } => {
+                match self.runtime.save_profile(&profile).await {
+                    Ok(id) => NodeResponse::ProfileSaved { id },
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+
+            NodeCommand::LoadProfile => match self.runtime.load_profile().await {
+                Ok(profile) => NodeResponse::Profile { profile },
+                Err(e) => NodeResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+
+            NodeCommand::SaveContactList { list } => {
+                match self.runtime.save_contact_list(&list).await {
+                    Ok(id) => NodeResponse::ContactListSaved { id },
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+
+            NodeCommand::LoadContactList => match self.runtime.load_contact_list().await {
+                Ok(list) => NodeResponse::ContactList { list },
+                Err(e) => NodeResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+
+            NodeCommand::SaveHomeIndex { index } => {
+                match self.runtime.save_home_index(&index).await {
+                    Ok(id) => NodeResponse::HomeIndexSaved { id },
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+
+            NodeCommand::LoadHomeIndex => match self.runtime.load_home_index().await {
+                Ok(index) => NodeResponse::HomeIndex { index },
+                Err(e) => NodeResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+
+            NodeCommand::SetHomeEntryShared { name, shared } => {
+                match self.runtime.set_home_entry_shared(&name, shared).await {
+                    Ok(id) => NodeResponse::HomeIndexSaved { id },
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+
+            NodeCommand::ShareObject { name, object, app } => {
+                match self.runtime.share_object(&name, &object, app).await {
+                    Ok(id) => NodeResponse::HomeIndexSaved { id },
                     Err(e) => NodeResponse::Error {
                         message: e.to_string(),
                     },

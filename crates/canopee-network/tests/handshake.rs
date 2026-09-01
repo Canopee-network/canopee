@@ -20,7 +20,7 @@ async fn make_manager(
     provider: Arc<dyn ObjectProvider>,
 ) -> (NetworkManager, Multiaddr) {
     let listen: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse().unwrap();
-    let manager = NetworkManager::new(identity, listen, provider).unwrap();
+    let manager = NetworkManager::new(identity, listen, provider, true).unwrap();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let bound = loop {
         let addrs = manager.listen_addresses().await.unwrap();
