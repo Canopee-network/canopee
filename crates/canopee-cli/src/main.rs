@@ -5,6 +5,7 @@ use canopee_storage::{AppManifest, ExportBundle, ObjectId, ObjectType};
 use clap::{Parser, Subcommand};
 use tokio::io::{AsyncBufReadExt, BufReader};
 mod app;
+mod uri;
 use app::{fetch_app, publish_directory, serve};
 use std::path::Path;
 
@@ -83,6 +84,43 @@ enum Commands {
         peer: Option<String>,
         #[arg(long, default_value_t = 0)]
         port: u16,
+        /// Open the served URL in the default browser instead of just printing it.
+        #[arg(long)]
+        open: bool,
+    },
+    /// Resolves a `canopee://` URI (e.g. `canopee://alice/portfolio`) to an
+    /// app and serves it in the default browser. Used by the OS-level URI
+    /// scheme handler registered via `canopee uri-register`.
+    Handle {
+        uri: String,
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+    },
+    /// Manages friendly short names (e.g. `alice`) that resolve to canonical
+    /// `canopee://identity/<peer-id>` owners inside `canopee://` URIs.
+    Alias {
+        #[command(subcommand)]
+        command: AliasCommand,
+    },
+    /// Registers this machine's OS to route `canopee://` URIs to `canopee handle`.
+    UriRegister,
+    /// Removes the OS-level `canopee://` scheme registration.
+    UriUnregister,
+}
+
+#[derive(Subcommand)]
+enum AliasCommand {
+    /// Maps `<name>` to a canonical owner (`canopee://identity/<peer-id>`).
+    Set {
+        name: String,
+        owner: String,
+    },
+    /// Lists all known aliases.
+    List,
+    /// Removes `<name>`.
+    #[command(alias = "rm")]
+    Remove {
+        name: String,
     },
 }
 
@@ -501,6 +539,7 @@ async fn main() {
             name,
             peer,
             port,
+            open,
         } => {
             let client = CanopeeClient::connect().await.unwrap();
 
@@ -523,7 +562,106 @@ async fn main() {
             };
 
             println!("Opening \"{}\" by {}", manifest.name, manifest.owner);
-            serve(files, port).await.unwrap();
+            serve(files, port, open).await.unwrap();
         }
+
+        Commands::Handle { uri, port } => {
+            let (owner, name) = match uri::split_uri(&uri) {
+                Ok(parts) => parts,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let owner = match uri::resolve_owner(&owner) {
+                Ok(owner) => owner,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            };
+
+            let client = match CanopeeClient::connect().await {
+                Ok(client) => client,
+                Err(e) => {
+                    // Remember the URI so it can be retried once a node is up,
+                    // rather than silently dropping the user's click.
+                    let pending = uri::pending_uri_path();
+                    let _ = std::fs::create_dir_all(pending.parent().unwrap_or(Path::new(".")));
+                    let _ = std::fs::write(&pending, &uri);
+                    eprintln!("Error: {e}");
+                    eprintln!(
+                        "The URI was saved to {} — start a node (`canopee start`) and re-run: canopee handle \"{uri}\"",
+                        pending.display()
+                    );
+                    std::process::exit(1);
+                }
+            };
+
+            let manifest_id = match client
+                .resolve_app_pointer(canopee_sdk::IdentityId::new(owner), name.clone())
+                .await
+            {
+                Ok(Some(id)) => id,
+                Ok(None) => {
+                    eprintln!("Error: no app pointer found for \"{name}\"");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("Error: failed to resolve app pointer: {e:#}");
+                    std::process::exit(1);
+                }
+            };
+
+            let (manifest, files) = match fetch_app(&client, manifest_id, None).await {
+                Ok(app) => app,
+                Err(e) => {
+                    eprintln!("Error: failed to open app: {e:#}");
+                    std::process::exit(1);
+                }
+            };
+
+            println!("Opening \"{}\" by {}", manifest.name, manifest.owner);
+            serve(files, port, true).await.unwrap();
+        }
+
+        Commands::Alias { command } => match command {
+            AliasCommand::Set { name, owner } => match uri::set_alias(&name, &owner) {
+                Ok(()) => println!("alias \"{name}\" -> {owner}"),
+                Err(e) => eprintln!("Error: {e:#}"),
+            },
+            AliasCommand::List => match uri::list_aliases() {
+                Ok(aliases) => {
+                    if aliases.is_empty() {
+                        println!("No aliases set");
+                    }
+                    for (name, owner) in aliases {
+                        println!("{name} -> {owner}");
+                    }
+                }
+                Err(e) => eprintln!("Error: {e:#}"),
+            },
+            AliasCommand::Remove { name } => match uri::remove_alias(&name) {
+                Ok(true) => println!("Removed alias \"{name}\""),
+                Ok(false) => println!("No alias \"{name}\" found"),
+                Err(e) => eprintln!("Error: {e:#}"),
+            },
+        },
+
+        Commands::UriRegister => match uri::register_scheme() {
+            Ok(()) => println!("Registered canopee:// scheme handler"),
+            Err(e) => {
+                eprintln!("Error: {e:#}");
+                std::process::exit(1);
+            }
+        },
+
+        Commands::UriUnregister => match uri::unregister_scheme() {
+            Ok(()) => println!("Removed canopee:// scheme handler"),
+            Err(e) => {
+                eprintln!("Error: {e:#}");
+                std::process::exit(1);
+            }
+        },
     }
 }

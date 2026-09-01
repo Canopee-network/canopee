@@ -24,6 +24,8 @@ See [`docs/comparison.md`](docs/comparison.md).
   through a relay.
 - [`docs/app-manifests.md`](docs/app-manifests.md) — publishing, announcing,
   resolving, fetching, and serving a static app/site peer-to-peer.
+- [`docs/canopee-uri-scheme.md`](docs/canopee-uri-scheme.md) — typing
+  `canopee://alice/portfolio` into a normal browser via the OS scheme handler.
 - [`docs/publishing-vs-building-apps.md`](docs/publishing-vs-building-apps.md) —
   the difference between publishing static content via `app-manifest` and
   building a real program on [`canopee-sdk`](crates/canopee-sdk); read this

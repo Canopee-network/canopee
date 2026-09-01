@@ -229,6 +229,17 @@ a `200` with a guessed `Content-Type` (by file extension) or a `404` is
 written back. The server runs until the process is killed — there's no
 "serve once and exit" mode.
 
+### Opening an app from a `canopee://` URI
+
+Typing a friendly address like `canopee://alice/portfolio` (or the canonical
+`canopee://identity/<peer-id>/portfolio`) straight into a browser address
+bar works too — see [`canopee-uri-scheme.md`](canopee-uri-scheme.md). It
+reuses every step in this section: the browser hands the URL to a
+registered OS handler, `canopee handle` resolves/opens the app, and the
+`serve` step above lands a plain `http://127.0.0.1:<port>` tab in the
+default browser. Adding `--open` to `canopee open` does the same without a
+URI (serve, then open the bound URL in the default browser).
+
 ## End-to-end: Alice publishes, Pierre opens it, Alice republishes
 
 **Alice:**

@@ -68,6 +68,21 @@ model for TLS is its own significant design problem (closer to how
 Tor/I2P avoid this entirely by not doing browser-visible HTTPS the normal
 way at all). This is the single biggest unstarted item on this list.
 
+**Decision made:** see
+[`roadmap-https-tls.md`](roadmap-https-tls.md), which disentangles two
+different problems this section runs together — local loopback TLS (cheap:
+optional TLS in `serve()` via a locally-installed root CA) vs. public
+WebPKI trust for a `canopee://` origin (structurally impossible in a stock
+browser without either a domain or a WebPKI-independent browser, mirroring
+Tor/I2P). Recommendation there: solve the local case, document the public
+case as a deliberate consequence rather than a fixable blocker.
+
+For the *address-bar* use case specifically, `canopee://` doesn't need TLS at
+all: browsers hand the URI to a registered OS scheme handler (`canopee handle`),
+which serves over loopback — so typing `canopee://alice/portfolio` in a normal
+browser works without ever facing the WebPKI. See
+[`canopee-uri-scheme.md`](canopee-uri-scheme.md).
+
 ### Performance at scale
 
 `serve()` reads a whole file into memory and writes it in one `write_all`

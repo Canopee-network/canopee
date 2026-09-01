@@ -5,6 +5,36 @@ use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
+/// Opens `url` in the user's default browser, best-effort. Cross-platform:
+/// `open` on macOS, `xdg-open` on Linux, `rundll32 url.dll` on Windows.
+pub fn open_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = tokio::process::Command::new("open");
+        c.arg(url);
+        c
+    };
+    #[cfg(target_os = "linux")]
+    let mut cmd = {
+        let mut c = tokio::process::Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("rundll32");
+        c.args(["url.dll,FileProtocolHandler", url]);
+        c
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    let _ = url; // unsupported platform: nothing to open
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    tokio::spawn(async move { let _ = cmd.spawn(); });
+    #[cfg(target_os = "windows")]
+    let _ = cmd.spawn();
+}
+
 pub async fn publish_directory(
     client: &CanopeeClient,
     directory: &Path,
@@ -210,14 +240,16 @@ const MIN_COMPRESSIBLE_LEN: usize = 256;
 
 /// Serves `files` (URL path -> bytes) over plain HTTP on `127.0.0.1:port`
 /// (pass 0 to let the OS pick a free port) until the process is killed.
+/// With `open_browser` set, opens the bound URL in the default browser before
+/// serving.
 ///
 /// HTTP/1.1 semantics: keep-alive persistent connections (unless the client
 /// asks to close), `Range` single-range requests, `gzip` content encoding for
 /// compressible types, `HEAD` with headers but no body, and `ETag` + 304
 /// conditional revalidation.
-pub async fn serve(files: HashMap<String, Vec<u8>>, port: u16) -> anyhow::Result<()> {
+pub async fn serve(files: HashMap<String, Vec<u8>>, port: u16, open_browser: bool) -> anyhow::Result<()> {
     let etags = compute_etags(&files);
-    serve_loop(files, etags, port).await
+    serve_loop(files, etags, port, open_browser).await
 }
 
 /// Computes a strong `ETag` for every file: the SHA-256 of its bytes, which
@@ -234,12 +266,17 @@ async fn serve_loop(
     files: HashMap<String, Vec<u8>>,
     etags: HashMap<String, String>,
     port: u16,
+    open_browser_after_bind: bool,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", port)).await?;
     let files = Arc::new(files);
     let etags = Arc::new(etags);
 
-    println!("Serving app at http://{}", listener.local_addr()?);
+    let addr = listener.local_addr()?;
+    println!("Serving app at http://{}", addr);
+    if open_browser_after_bind {
+        open_browser(&format!("http://{addr}"));
+    }
 
     loop {
         let (stream, _) = listener.accept().await?;

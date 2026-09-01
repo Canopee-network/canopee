@@ -31,6 +31,18 @@ impl Config {
         self.root.join("node.sock")
     }
 
+    /// Map of friendly short names (`alice`) to canonical owner identities
+    /// (`canopee://identity/<peer-id>`), used to resolve `canopee://` URIs.
+    pub fn aliases_path(&self) -> PathBuf {
+        self.root.join("aliases")
+    }
+
+    /// Scratch file where the `canopee://` scheme handler records the URI it
+    /// was handed when no node was running, so it isn't silently dropped.
+    pub fn uri_pending_path(&self) -> PathBuf {
+        self.root.join("uri-pending")
+    }
+
     pub fn listen_addr(&self) -> String {
         let port = std::env::var("CANOPEE_LISTEN_PORT").unwrap_or_else(|_| "0".to_string());
         format!("/ip4/0.0.0.0/tcp/{port}")

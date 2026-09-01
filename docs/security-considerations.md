@@ -186,7 +186,7 @@ client), but it removes an entire *other* process from the equation.
 | Object tampering/impersonation | Handled — signed, content-addressed, verified on every access | `canopee-storage` README |
 | App pointer impersonation | Handled — signature + owner-derivation check | `AppPointerRecord::verify`, `app-manifests.md` |
 | Content/message privacy | **Not handled by default** — signed ≠ encrypted; key-agreement primitive exists, and a tutorial builds on it, but no app gets this for free | This doc, [`end-to-end-encryption.md`](end-to-end-encryption.md), `tauri-chat-app-tutorial.md` Step 6 |
-| `open`'s HTTP server transport | **Not handled** — plain HTTP | `roadmap-hosting-replacement.md` |
+| `open`'s HTTP server transport | Partial — plain HTTP on loopback (safe for localhost); public WebPKI trust for `canopee://` origins is structurally impossible in a stock browser | [`roadmap-https-tls.md`](roadmap-https-tls.md) |
 | Direct peer-to-peer transport | Handled — Noise-encrypted | `canopee-network` (relayed hops excepted) |
 | Bootstrap/DHT poisoning | Partial — mitigation designed, not built | `bootstrap-nodes-tutorial.md` Step 4 |
 | Cache node misbehavior (availability) | **Not handled** — no reputation system | This doc |
