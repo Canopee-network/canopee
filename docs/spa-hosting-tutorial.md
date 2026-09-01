@@ -218,16 +218,70 @@ try to publish it, and confirm you get a clear error at publish time
 rather than a working-looking publish that silently 404s every asset once
 opened.
 
+## Design decisions (as implemented)
+
+For anyone reading this after the code landed, here is what was chosen and
+why:
+
+- **Fallback heuristic:** a request only falls back to `/` when the last
+  path segment has no file extension (no `.` in it) — i.e. it "looks like a
+  route". Paths whose last segment *does* have an extension (`/style.css`,
+  `/assets/index-a1b2c3.js`) never fall back; a genuinely missing asset is
+  a real `404`, so a broken asset reference shows up as a visible error
+  instead of a silent 200-of-HTML. Nested routes (`/users/42`) and query
+  strings (`/users/42?tab=posts`, which `handle_connection` now strips
+  before lookup) both work.
+- **Fallback body's `Content-Type`:** is derived from the key actually
+  served (`/`), so it's always `text/html` — derived from the served key,
+  never the requested route.
+- **Method handling:** explicitly punted — `handle_connection` still only
+  reads the path element of the request line and ignores the HTTP method,
+  exactly as before. Out of scope for this tutorial.
+- **MIME fallback:** unrecognized extensions stay
+  `application/octet-stream` (a browser's "this forces a download" default
+  is the right behavior for something we genuinely don't know), but the
+  mapping now covers everything a modern JS bundler realistically emits:
+  `html/htm`, `css`, `js/mjs`, `json/map`, `txt`, `xml`, `wasm`,
+  `png/jpg/jpeg/gif/webp/avif/svg`, `ico`, `woff/woff2/ttf/otf/eot`,
+  `mp4/webm`, `mp3`.
+- **Base-path validation:** `publish_directory` scans the entrypoint HTML
+  for `src="/` and `href="/` attributes (plain string search, no HTML
+  parser), cross-checks each absolute path against the `assets` map it just
+  built, and fails `app-manifest` with an error naming every missing path
+  and suggesting `base: '/'` (Vite) / removing `homepage` (CRA).
+  Protocol-relative (`//…`) and full-URL (`https://…`) references are
+  ignored, as are query strings and fragments.
+
+## Verified end-to-end
+
+Steps 1–3 landed together and were verified both by unit tests
+(`cargo test -p canopee-cli`) and against a live two-node setup:
+
+- Alice published a hand-built SPA directory: `index.html` referencing
+  `/favicon.ico`, `/assets/app.css`, `/assets/app.js`; Pierre opened it via
+  `canopee open --owner <alice-id> --name spa-demo --peer <alice-peer>`.
+- `GET /` → `200 text/html`, the entrypoint.
+- `GET /about` (a route never published) → `200 text/html`,
+  the *same* entrypoint body — client-side router can now take over.
+- `GET /users/42?tab=posts` → `200 text/html`, entrypoint.
+- `GET /assets/app.js` → `200 application/javascript`;
+  `/assets/app.css` → `200 text/css`; `/favicon.ico` → `200 image/x-icon`
+  (all previously `application/octet-stream`).
+- `GET /assets/nope.js` → `404` (missing *asset* stays an error).
+- Publishing an entrypoint referencing an unpublished path
+  (e.g. a Vite build made with `base: '/my-app/'`) fails `app-manifest`
+  immediately, naming the offending paths.
+
 ## Summary checklist
 
-- [ ] Step 1 — `guess_content_type` covers fonts, icons, and other common
+- [x] Step 1 — `guess_content_type` covers fonts, icons, and other common
       bundler output, verified against a real build's `Content-Type`
       headers
-- [ ] Step 2 — unknown route-shaped paths fall back to `index.html` with a
+- [x] Step 2 — unknown route-shaped paths fall back to `index.html` with a
       `200`, while genuinely missing assets still correctly `404` —
       verified with both a working client-side-routed page *and* a
       deliberately-broken asset path
-- [ ] Step 3 (stretch) — `app-manifest` catches a non-root build base path
+- [x] Step 3 (stretch) — `app-manifest` catches a non-root build base path
       at publish time instead of failing silently later
 
 By the end, publishing `npm run build`'s output should behave like
