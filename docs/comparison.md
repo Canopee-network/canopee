@@ -67,8 +67,11 @@ This isn't a "Canopee wins" comparison. Concretely, today:
   list (message content, transport TLS, key-at-rest). IPFS/Iroh have the
   same gap in different forms, but it's still a real gap here, not a
   differentiator.
-- **No bootstrap node list yet** — [`bootstrap-nodes-tutorial.md`](bootstrap-nodes-tutorial.md)
-  scopes the work; IPFS ships with a working default bootstrap list today.
+- **A minimal bootstrap relay list (hardcoded, single entry) exists, but
+  no community-maintained discovery yet** — [`bootstrap-nodes-tutorial.md`](bootstrap-nodes-tutorial.md)
+  describes the built-in defaults and the (written, not implemented) DNS
+  design; IPFS ships a richer, community-maintained default bootstrap list
+  today.
 - **Far less battle-tested and adopted.** IPFS has years of production
   usage, tooling, and a large ecosystem (pinning services, gateways,
   IPFS-aware browsers). Iroh, while newer, is more actively developed and

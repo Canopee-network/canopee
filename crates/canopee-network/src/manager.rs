@@ -800,3 +800,126 @@ async fn handle_swarm_event(
         _ => {}
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Once;
+
+    /// The env vars `bootstrap_addrs()` reads are process-global, so tests
+    /// that set them must be serialized against each other and against any
+    /// test that spawns a real `NetworkManager` (which reads them too).
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static SETUP: Once = Once::new();
+
+    fn clear_bootstrap_env() {
+        SETUP.call_once(|| {
+            // Additionally save any pre-existing values so `cargo test` inside a
+            // developer shell that already exports these vars fails loudly
+            // rather than silently producing a degraded list.
+            if std::env::var_os("CANOPEE_BOOTSTRAP_ADDRS").is_some()
+                || std::env::var_os("CANOPEE_BOOTSTRAP_ADDRS_PREPEND").is_some()
+            {
+                panic!(
+                    "CANOPEE_BOOTSTRAP_ADDRS(_PREPEND) is set in the test \
+                     environment; unset it before running these tests so they \
+                     test the defaults deterministically"
+                );
+            }
+        });
+    }
+
+    /// Sets an env var for the duration of the closure, restoring it after.
+    fn with_env<K: AsRef<str>, V: AsRef<str>>(
+        key: K,
+        value: Option<V>,
+        f: impl FnOnce(),
+    ) {
+        let key = key.as_ref();
+        let prev = std::env::var_os(key);
+        match value {
+            Some(v) => unsafe {
+                std::env::set_var(key, v.as_ref());
+            },
+            None => unsafe {
+                std::env::remove_var(key);
+            },
+        }
+        f();
+        match prev {
+            Some(v) => unsafe {
+                std::env::set_var(key, v);
+            },
+            None => unsafe {
+                std::env::remove_var(key);
+            },
+        }
+    }
+
+    fn addrs() -> Vec<String> {
+        bootstrap_addrs().into_iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn defaults_used_when_no_env_override() {
+        let _guard = LOCK.lock().unwrap();
+        clear_bootstrap_env();
+        assert!(!addrs().is_empty(), "default bootstrap list must not be empty");
+        assert_eq!(addrs()[0].parse::<Multiaddr>().unwrap().to_string(), addrs()[0]);
+    }
+
+    #[test]
+    fn env_override_replaces_defaults() {
+        let _guard = LOCK.lock().unwrap();
+        clear_bootstrap_env();
+        with_env("CANOPEE_BOOTSTRAP_ADDRS", Some("/ip4/127.0.0.1/tcp/9999/p2p/12D3KooWGiPk75fg8HBW7WJCouTTTLNi8W3s48sBK8AKewZKbCjC"), || {
+            let addrs = addrs();
+            assert_eq!(addrs.len(), 1, "override must replace the defaults entirely");
+            assert!(addrs[0].starts_with("/ip4/127.0.0.1/tcp/9999"));
+        });
+    }
+
+    #[test]
+    fn prepend_flag_extends_defaults_with_env() {
+        let _guard = LOCK.lock().unwrap();
+        clear_bootstrap_env();
+        with_env(
+            "CANOPEE_BOOTSTRAP_ADDRS",
+            Some("/ip4/127.0.0.1/tcp/9999/p2p/12D3KooWGiPk75fg8HBW7WJCouTTTLNi8W3s48sBK8AKewZKbCjC"),
+            || {
+                with_env("CANOPEE_BOOTSTRAP_ADDRS_PREPEND", Some("1"), || {
+                    let addrs = addrs();
+                    assert!(addrs.len() > 1, "prepend keeps the defaults too");
+                    assert!(addrs[0].starts_with("/ip4/127.0.0.1/tcp/9999"));
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn empty_override_opts_out_of_defaults() {
+        let _guard = LOCK.lock().unwrap();
+        clear_bootstrap_env();
+        with_env("CANOPEE_BOOTSTRAP_ADDRS", Some(""), || {
+            assert!(
+                addrs().is_empty(),
+                "an explicit empty override means 'dial nothing', not 'use defaults'"
+            );
+        });
+    }
+
+    #[test]
+    fn invalid_entries_are_dropped_not_fatal() {
+        let _guard = LOCK.lock().unwrap();
+        clear_bootstrap_env();
+        with_env(
+            "CANOPEE_BOOTSTRAP_ADDRS",
+            Some("/ip4/127.0.0.1/tcp/9999/p2p/12D3KooWGiPk75fg8HBW7WJCouTTTLNi8W3s48sBK8AKewZKbCjC,not-a-multiaddr,,  "),
+            || {
+                let addrs = addrs();
+                assert_eq!(addrs.len(), 1, "garbage and blanks must be skipped");
+                assert!(addrs[0].starts_with("/ip4/127.0.0.1/tcp/9999"));
+            },
+        );
+    }
+}

@@ -270,16 +270,148 @@ for Canopee specifically) is a legitimate stopping point for this
 tutorial. If you do implement something, start with the DNS approach —
 it's the most proven and the least new infrastructure to build and trust.
 
+## Step 3 outcome: explicit `bootstrap()` rejected, with reasoning
+
+Steps 1–2 got implemented (see the verified section below); Step 3 was
+evaluated and **explicitly decided against** — the design question in the
+step resolves to "the library already does this for you," and adding the
+trigger would be dead code.
+
+The reasoning, which is the honest answer to the step's own design
+question ("is an explicit, manually-triggered `bootstrap()` call actually
+necessary, or purely an optimization?"):
+
+- **libp2p-kad bootstraps itself.** The rustdoc on
+  `kad::Behaviour::bootstrap()` states it directly: *"Bootstrap does not
+  require to be called manually. It is periodically invoked at regular
+  intervals based on the configured `periodic_bootstrap_interval` and it is
+  also automatically invoked when a new peer is inserted in the routing
+  table."*
+- **The automatic trigger covers exactly the fresh-node case.** Looking at
+  the source, `bootstrap_on_low_peers()` runs whenever a new peer is
+  inserted into a routing table with fewer than `K_VALUE` (20) entries
+  entered — which is precisely the state of a node that just dialed its
+  first bootstrap address. Our dialed bootstrap peer gets inserted by the
+  existing `add_address` on `ConnectionEstablished`, which immediately
+  qualifies as "a new peer inserted into a small routing table" and fires
+  the bootstrap automatically. There is no window where a manual call adds
+  anything: it either races the auto-trigger or duplicates it.
+- **`periodic_bootstrap_interval` defaults to `Some(5 min)`**, so even a
+  node that fills its routing table above the auto-trigger threshold gets
+  periodic refreshes forever, with zero code.
+- **Measured, not just argued:** a fresh node dialing one bootstrap
+  address and doing nothing else reached a fully populated peer list from a
+  single entry within ~1s, with no explicit `bootstrap()` call anywhere.
+  There was no latency gap for the call to close. (Same-machine peers
+  included LAN mDNS discoveries, but the point stands: routing-table
+  filling is not a bottleneck a manual call would improve.)
+
+So: **not implemented, by decision** — consistent with the step's own
+guidance ("document it and move on rather than keeping dead code").
+
+## Step 4 design: the decision document (from the stretch above, written, not implemented)
+
+Step 4's stretch goal is community-maintained bootstrap lists. A written
+design doc is a legitimate stopping point per the tutorial; below is that
+design decision for Canopee, weighing the three options.
+
+**Requirement the design must meet:** the list a fresh node trusts *before
+it has any other peer to compare against* is the single most sensitive
+piece of configuration in the network (see
+[`security-considerations.md`](security-considerations.md#dht-and-bootstrap-trust)
+for the poisoning framing). The design must therefore keep the "first
+trust" surface as small and curated as today, and layer any community
+mechanism on top of it, never instead of it.
+
+**Answer: a DNS-based seed list (option 1), with the DHT-published
+community list (option 2) explicitly deferred — and all three share the
+signed-submission discipline from option 3.**
+
+- **Why DNS (not DHT) for the primary extension:** the tutorial itself
+  argues the DNS approach is "the most proven and the least new
+  infrastructure to build and trust." It also has a property the DHT
+  option structurally lacks: it works **before** you're connected to
+  anything. The DHT-published list (option 2) has a genuine bootstrapping
+  paradox — you need to already be in the DHT to fetch more DHT addresses
+  — so it can only ever *supplement* a seed, never be the seed. DNS TXT
+  records under a domain Canopee's maintainers control (`bootstrap.canopee…`)
+  can be the seed *and* the supplement. Publishing addresses as TXT
+  records is standard (Bitcoin/IPFS do exactly this), is resolvable with
+  no new dependency (plain `Tokio` DNS resolution), and lets the maintainers
+  rotate relays without shipping a new binary.
+- **Why the community contributions are signed and allowlisted (option 3),
+  not open:** the poisoning risk from *open* submission is fatal to a
+  bootstrap list — one malicious relay's address gets dialed by every
+  fresh node. Mirroring `AppPointerRecord::verify` (which already checks a
+  record's signature belongs to its claimed owner before trusting
+  `record.manifest`), each list entry should carry an Ed25519 signature
+  verifiable against a curated allowlist of trusted publisher identities,
+  not "anyone can add an address." This partially mitigates the
+  DHT-poisoning row in `security-considerations.md`'s threats table.
+- **Why the DHT-published list (option 2) is deferred, not rejected:** it's
+  the most architecturally elegant option (reuses `put_record`/`get_record`
+  you already have, no new infrastructure), but it should come *after* the
+  DNS seed exists, as a supplement for already-connected nodes, not as a
+  first-contact mechanism. Revisit once the DNS seed list is live and
+  rotating.
+- **What a DNS lapse means, decided here:** if the domain lapses, fresh
+  nodes degrade to the hardcoded seed baked in the binary — the same
+  state as today — and DNS can be restored at any time. This is an
+  acceptable failure mode, and it's why the hardcoded list stays in the
+  binary permanently as the irreducible fallback.
+
+Implementation status: **documented only.** The DNS seed list (resolution
+of a well-known TXT record at startup, merged into `bootstrap_addrs()`
+under the existing `CANOPEE_BOOTSTRAP_ADDRS` replace/prepend semantics) is
+the recommended first implementation when someone picks this up.
+
+## Verified end-to-end
+
+Live verification on two nodes (two `$HOME`s on one machine, per
+[`testing-chat-between-peers.md`](testing-chat-between-peers.md#running-two-local-nodes-on-one-machine)):
+
+1. **Step 1 (defaults):** started a node with a completely empty `$HOME`
+   and no env vars. It dialed `DEFAULT_BOOTSTRAP_ADDRS` on its own and its
+   `peers` list included the reachable network relay — no manual `canopee
+   dial` anywhere.
+2. **Step 2 (override):** pointed a second fresh node at the first via
+   `CANOPEE_BOOTSTRAP_ADDRS="/ip4/127.0.0.1/<port>/p2p/<peer-id>"`. Without
+   ever running `canopee dial`, its `peers` list contained that peer (and,
+   via the DHT, the relay).
+3. **Negative control for crash-safety:** set an override to an *invalid*
+   address (`/ip4/127.0.0.1/tcp/59999/p2p/…`). `NetworkManager::new`
+   returned, the node kept running, and continued to function normally —
+   dial failures are warnings, not fatal, exactly as the step's design
+   section prescribes.
+4. **Merge semantics locked by unit tests.** Because a single machine's
+   mDNS makes two-node `peers` checks unable to *attribute* a connection to
+   bootstrap dialing vs. LAN discovery (the reason the tutorial's own
+   verification presumes two machines), the replace/prepend/empty/ignore
+   semantics of `bootstrap_addrs()` are pinned by unit tests in
+   `manager.rs`:
+   - no env → defaults used;
+   - `CANOPEE_BOOTSTRAP_ADDRS` set → replaces defaults entirely;
+   - `CANOPEE_BOOTSTRAP_ADDRS_PREPEND=1` → env values prepended, defaults
+     kept;
+   - `CANOPEE_BOOTSTRAP_ADDRS=""` → an explicit empty list means "dial
+     nothing" (operators running isolated), *not* "restore defaults";
+   - garbage/blank entries are dropped, not fatal.
+
+   Plus, on a from-scratch dial, a fresh node's peer list went from one
+   bootstrap entry to a fully populated set within ~1s, with no latency gap
+   for a manual `bootstrap()` call to close — the direct measurement behind
+   Step 3's "rejected" decision.
+
 ## Summary checklist
 
-- [ ] Step 1 — a static default bootstrap list, dialed automatically on
+- [x] Step 1 — a static default bootstrap list, dialed automatically on
       `NetworkManager::new`, verified with a from-scratch two-node test
       that never runs `canopee dial` manually
-- [ ] Step 2 — an environment variable or config file lets operators
+- [x] Step 2 — an environment variable or config file lets operators
       override/extend the defaults, with explicit merge semantics
-- [ ] Step 3 — evaluated (and either added, or explicitly decided against
+- [x] Step 3 — evaluated (and either added, or explicitly decided against
       with reasoning) an explicit `kad.bootstrap()` trigger
-- [ ] Step 4 — a written-down (and optionally implemented) design for
+- [x] Step 4 — a written-down (and optionally implemented) design for
       moving beyond a hardcoded list toward community-maintained addresses
 
 By the end, a node with a completely empty `~/.canopee` and no prior
