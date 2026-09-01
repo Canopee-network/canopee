@@ -146,16 +146,18 @@ knows which owner they're looking for.
   see [`multi-device-identity.md`](multi-device-identity.md), whose only
   option today is copying the same private key to every device, with the
   same lack of revocation and no per-device trust separation at all.
-- **The private key file is stored unencrypted on disk.**
+- **The private key file can be stored unencrypted on disk (the default).**
   `Identity::create`/`load` write/read raw protobuf-encoded key bytes with
   no passphrase or OS-keychain integration
   ([`crates/canopee-identity/src/identity.rs`](../crates/canopee-identity/src/identity.rs)).
-  The `canopee-identity` README already says this outright: "treat the
-  identity file like an SSH private key — filesystem permissions are the
-  only protection today." Worth restating here because it's the single
-  point of failure behind every other guarantee in this document — every
-  signature, every pointer, every object's provenance traces back to
-  whether this one file stayed private.
+  This can be hardened by opting in to encrypted-at-rest
+  (`Identity::create_encrypted`/`load_encrypted`, or setting
+  `CANOPEE_IDENTITY_PASS` when starting `canopee-node`), which wraps the
+  protobuf key with Argon2id + XChaCha20-Poly1305 before writing — but
+  even then the identity is a single passphrase+file pair with no per-device
+  trust separation and no recovery if the passphrase is lost. See
+  [`canopee-identity/README.md`](../crates/canopee-identity/README.md) for
+  the current threat model and migration steps.
 
 ## Local trust boundary: the node's socket
 
@@ -190,7 +192,7 @@ client), but it removes an entire *other* process from the equation.
 | Cache node misbehavior (availability) | **Not handled** — no reputation system | This doc |
 | Global human-readable namespace | Not applicable — `(owner, name)` isn't global by design | This doc |
 | Key compromise / revocation | **Not handled** | This doc |
-| Private key at rest | **Not handled** — plaintext file, permissions only | `canopee-identity` README |
+| Private key at rest | Handled (opt-in) — encrypted at rest via Argon2id + XChaCha20-Poly1305; plaintext by default, set `CANOPEE_IDENTITY_PASS` to encrypt | `canopee-identity` README, `security-considerations.md` Key management |
 | Local socket authorization | Limited to OS file permissions; embedding avoids the issue | This doc, `tauri-chat-app-tutorial.md` |
 
 Treat "Not handled" rows as open work, not as bugs to file — none of them

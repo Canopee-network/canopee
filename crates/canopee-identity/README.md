@@ -44,11 +44,17 @@ let keypair = identity.keypair();
 // app discovers peers; it is not resolved by `IdentityId` today.
 let my_dh_public_key = identity.dh_public_key();
 let shared_secret = identity.agree(&their_dh_public_key); // run through a KDF before using as a cipher key
+
+// Encrypted at rest (see "Encrypted identity at rest" below).
+let (identity, encrypted_at_rest) = Identity::load_encrypted(
+    "~/.canopee/identity/identity.key",
+    "my-passphrase",
+).await?;
 ```
 
 | Type | Purpose |
 |---|---|
-| `Identity` | Holds the keypair and derived `IdentityId`; sign/verify/create/load |
+| `Identity` | Holds the keypair and derived `IdentityId`; sign/verify/create/load/encrypted-at-rest |
 | `IdentityId` | `canopee://identity/<PeerId>` — the node's public, stable address |
 
 `IdentityId::new(id)` builds one from a raw string — e.g. one another user
@@ -58,7 +64,41 @@ the string's shape; malformed input just fails to resolve to anything later
 (e.g. an app pointer lookup under a bogus owner simply finds nothing).
 
 `Identity::create`/`Identity::load` are async only because they do file I/O
-(`tokio::fs`); the crypto itself is synchronous.
+(`tokio::fs`); the crypto itself is synchronous. `create_encrypted`/`load_encrypted`
+share the same property.
+
+## Encrypted identity at rest
+
+The `create_encrypted`/`load_encrypted` methods encrypt the on-disk key
+with Argon2id (memory-hard password hashing) and XChaCha20-Poly1305 (AEAD),
+so an attacker with access to the filesystem alone cannot recover the
+signing key without the passphrase. Set the `CANOPEE_IDENTITY_PASS`
+environment variable when starting `canopee-node` to enable encrypted-at-rest
+for that node.
+
+```text
+# Create an encrypted identity on first run:
+CANOPEE_IDENTITY_PASS="my-passphrase" cargo run -p canopee-node
+
+# Subsequent starts with the same passphrase load correctly:
+CANOPEE_IDENTITY_PASS="my-passphrase" cargo run -p canopee-node
+
+# A wrong passphrase fails immediately with a clear error.
+```
+
+Important:
+- `create_encrypted`/`load_encrypted` are opt-in — `create`/`load` remain
+  unchanged and write plaintext protobuf. Existing deployments are unaffected
+  until they explicitly opt in.
+- Setting `CANOPEE_IDENTITY_PASS` when an existing plaintext key file is
+  present does **not** retroactively encrypt it; the runtime logs a warning.
+  To encrypt, delete the key file and restart with the env var set.
+- The passphrase lives only in the process environment for the duration of
+  the run; there is no disk-stored recovery, and losing the passphrase
+  means losing the identity permanently.
+- The on-disk format is a versioned envelope (`canopee-v1-ek`, Argon2id v19
+  with parameters stored in the envelope, 192-bit nonce) — loadable by any
+  canopee version that ships the same envelope reader.
 
 ## Key agreement (X25519)
 
@@ -86,10 +126,15 @@ crate deliberately stops at the raw shared secret:
 
 ## Design notes
 
-- The private key is stored on disk as raw protobuf-encoded key bytes
-  (`Keypair::to_protobuf_encoding` / `from_protobuf_encoding`) with no
-  additional encryption. Treat the identity file like an SSH private key —
-  filesystem permissions are the only protection today.
+- **Plaintext mode** (the default): the private key is stored on disk as raw
+  protobuf-encoded key bytes (`Keypair::to_protobuf_encoding` /
+  `from_protobuf_encoding`) with no additional encryption — filesystem
+  permissions are the only protection. **Encrypted mode**
+  (`create_encrypted`/`load_encrypted`, or when `CANOPEE_IDENTITY_PASS` is
+  set in `canopee-runtime`): the protobuf is wrapped in a versioned
+  envelope encrypted at rest with Argon2id + XChaCha20-Poly1305, as
+  described in "Encrypted identity at rest" above. Both modes load the
+  same `Identity` type; the only difference is what ends up on disk.
 - `IdentityId` wraps a `String`, not the underlying `PeerId`/`Keypair`
   directly, so it can be freely serialized (`serde`) and passed around the
   wire protocol (see [`canopee-protocol`](../canopee-protocol)) without

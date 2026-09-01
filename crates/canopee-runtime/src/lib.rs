@@ -45,9 +45,31 @@ impl Runtime {
         let identity_dir = config.identity_path();
         tokio::fs::create_dir_all(&identity_dir).await?;
         let identity_path = identity_dir.join("identity.key");
-        let identity = match Identity::load(identity_path.to_str().unwrap()).await {
-            Ok(id) => id,
-            Err(_) => Identity::create(identity_path.to_str().unwrap()).await?,
+        let passphrase: Option<String> = std::env::var_os("CANOPEE_IDENTITY_PASS")
+            .and_then(|p| p.into_string().ok());
+        let identity = match passphrase.as_deref() {
+            Some(pass) => {
+                let path_str = identity_path.to_str().unwrap();
+                if !tokio::fs::try_exists(&identity_path).await.unwrap_or(false) {
+                    Identity::create_encrypted(path_str, pass).await?
+                } else {
+                    let (id, encrypted_at_rest) =
+                        Identity::load_encrypted(path_str, pass).await?;
+                    if !encrypted_at_rest {
+                        eprintln!(
+                            "WARNING: CANOPEE_IDENTITY_PASS is set but the identity key \
+                             at {} is not encrypted at rest. To encrypt it, delete the \
+                             key file and restart with CANOPEE_IDENTITY_PASS set.",
+                            identity_path.display()
+                        );
+                    }
+                    id
+                }
+            }
+            None => match Identity::load(identity_path.to_str().unwrap()).await {
+                Ok(id) => id,
+                Err(_) => Identity::create(identity_path.to_str().unwrap()).await?,
+            },
         };
         let state_path = config.state_path();
         tokio::fs::create_dir_all(state_path.parent().unwrap()).await?;
