@@ -1,7 +1,7 @@
 use canopee_sdk::CanopeeClient;
 use canopee_storage::{AppManifest, Object, ObjectId};
 use futures::future::try_join_all;
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -200,85 +200,423 @@ pub async fn fetch_app(
     Ok((manifest, files))
 }
 
+/// How long a connection may sit idle (no bytes received) before the server
+/// closes it. Keep-alive makes idle sockets a real resource, so this is
+/// bounded rather than unbounded.
+const KEEP_ALIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bodies smaller than this are not worth gzipping — the gzip header and
+/// trailer alone can exceed the savings.
+const MIN_COMPRESSIBLE_LEN: usize = 256;
+
 /// Serves `files` (URL path -> bytes) over plain HTTP on `127.0.0.1:port`
 /// (pass 0 to let the OS pick a free port) until the process is killed.
+///
+/// HTTP/1.1 semantics: keep-alive persistent connections (unless the client
+/// asks to close), `Range` single-range requests, `gzip` content encoding for
+/// compressible types, `HEAD` with headers but no body, and `ETag` + 304
+/// conditional revalidation.
 pub async fn serve(files: HashMap<String, Vec<u8>>, port: u16) -> anyhow::Result<()> {
+    let etags = compute_etags(&files);
+    serve_loop(files, etags, port).await
+}
+
+/// Computes a strong `ETag` for every file: the SHA-256 of its bytes, which
+/// is exactly what `ObjectId::from_data` already is — content-addressed
+/// identity, reused as HTTP cache identity.
+fn compute_etags(files: &HashMap<String, Vec<u8>>) -> HashMap<String, String> {
+    files
+        .iter()
+        .map(|(path, bytes)| (path.clone(), ObjectId::from_data(bytes).0))
+        .collect()
+}
+
+async fn serve_loop(
+    files: HashMap<String, Vec<u8>>,
+    etags: HashMap<String, String>,
+    port: u16,
+) -> anyhow::Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", port)).await?;
     let files = Arc::new(files);
+    let etags = Arc::new(etags);
 
     println!("Serving app at http://{}", listener.local_addr()?);
 
     loop {
         let (stream, _) = listener.accept().await?;
         let files = files.clone();
+        let etags = etags.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, &files).await {
+            if let Err(e) = handle_connection(stream, &files, &etags).await {
                 eprintln!("connection error: {e}");
             }
         });
     }
 }
 
+/// Serves requests on a connection until the client closes it, asks to close,
+/// or goes idle past `KEEP_ALIVE_IDLE_TIMEOUT`.
 async fn handle_connection(
-    mut stream: TcpStream,
+    stream: TcpStream,
     files: &HashMap<String, Vec<u8>>,
+    etags: &HashMap<String, String>,
 ) -> anyhow::Result<()> {
-    let path = {
-        let mut reader = BufReader::new(&mut stream);
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+
+    while let Some(request) = read_request(&mut reader).await? {
+        let (header, body) = prepare_response(&request, files, etags);
+        write_half.write_all(header.as_bytes()).await?;
+        if let Some(body) = body {
+            write_half.write_all(&body).await?;
+        }
+        if request.close_after_response {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// A parsed HTTP request with just enough understood to serve static files.
+struct Request {
+    method: String,
+    path: String,
+    /// `Connection: close`, or no keep-alive candidate (an HTTP/1.0 client
+    /// that didn't ask for it).
+    close_after_response: bool,
+    range: Option<String>,
+    accepts_gzip: bool,
+    if_none_match: Option<String>,
+}
+
+/// Reads one request (request line + headers) from the connection. Returns
+/// `Ok(None)` on EOF or on an idle timeout, meaning the connection is done.
+async fn read_request(reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>) -> std::io::Result<Option<Request>> {
+    loop {
         let mut request_line = String::new();
-        if reader.read_line(&mut request_line).await? == 0 {
-            return Ok(());
+        let Some(n) = read_with_timeout(reader, &mut request_line).await? else {
+            return Ok(None);
+        };
+        if n == 0 {
+            return Ok(None);
         }
-        loop {
-            let mut line = String::new();
-            let n = reader.read_line(&mut line).await?;
-            if n == 0 || line == "\r\n" || line == "\n" {
-                break;
-            }
+        // Stray blank lines (keep-alive probes, empty pings) are skipped.
+        if request_line.trim().is_empty() {
+            continue;
         }
-        request_line
-            .split_whitespace()
-            .nth(1)
+
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next().unwrap_or("GET").to_string();
+        let path = parts
+            .next()
             .unwrap_or("/")
             .split('?')
             .next()
             .unwrap_or("/")
-            .to_string()
-    };
+            .to_string();
+        let http_version = parts.next().unwrap_or("HTTP/1.1");
 
+        let mut close_after_response = http_version == "HTTP/1.0";
+        let mut range = None;
+        let mut accepts_gzip = false;
+        let mut if_none_match = None;
+
+        loop {
+            let mut line = String::new();
+            let Some(n) = read_with_timeout(reader, &mut line).await? else {
+                return Ok(None);
+            };
+            if n == 0 || line == "\r\n" || line == "\n" {
+                break;
+            }
+            let lower = line.to_ascii_lowercase();
+            if let Some(value) = lower.strip_prefix("connection:") {
+                // Explicit header overrides the per-version default.
+                close_after_response = value.trim() == "close";
+            } else if lower.starts_with("range:") {
+                range = Some(line.trim().to_string());
+            } else if let Some(value) = lower.strip_prefix("accept-encoding:") {
+                accepts_gzip = value.contains("gzip");
+            } else if let Some(value) = lower.strip_prefix("if-none-match:") {
+                if_none_match = Some(value.trim().to_string());
+            }
+        }
+
+        return Ok(Some(Request {
+            method,
+            path,
+            close_after_response,
+            range,
+            accepts_gzip,
+            if_none_match,
+        }));
+    }
+}
+
+/// Reads a line, treating an idle timeout as a clean end of connection
+/// (`Ok(None)`); a timeout isn't an error worth printing as one.
+async fn read_with_timeout(
+    reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+    buf: &mut String,
+) -> std::io::Result<Option<usize>> {
+    match tokio::time::timeout(KEEP_ALIVE_IDLE_TIMEOUT, reader.read_line(buf)).await {
+        Ok(n) => Ok(Some(n?)),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Resolves the request to what gets served, then builds the full response
+/// (header bytes + optional body). GET/HEAD get the HTTP semantics; every
+/// other method is answered the same as GET because the server is a read-only
+/// static host and method parsing beyond HEAD is out of scope.
+fn prepare_response(
+    request: &Request,
+    files: &HashMap<String, Vec<u8>>,
+    etags: &HashMap<String, String>,
+) -> (String, Option<Vec<u8>>) {
     // Exact match wins. Otherwise, SPA fallback: a miss for a route-shaped
     // path (no file extension in its last segment) serves the entrypoint so
     // the client-side router can render `/about` etc. on refresh/direct
     // load. A miss for something that *looks like an asset* (e.g.
     // `/assets/broken.js`) stays a real 404, so a broken asset reference
-    // isn't silently swaddled in HTML. This deliberately ignores the HTTP
-    // method (heads, POSTs, etc. are treated the same) — the server is a
-    // read-only static host and parsing methods is out of scope here.
-    let (served_key, body, status) = if let Some(body) = files.get(&path) {
-        (&path as &str, Some(body), "200 OK")
-    } else if !is_asset_request(&path) {
+    // isn't silently swaddled in HTML.
+    let (served_key, found) = if let Some(body) = files.get(&request.path) {
+        (request.path.as_str(), Some(body))
+    } else if !is_asset_request(&request.path) {
         match files.get("/") {
-            Some(entrypoint) => ("/", Some(entrypoint), "200 OK"),
-            None => (&path as &str, None, "404 Not Found"),
+            Some(entrypoint) => ("/", Some(entrypoint)),
+            None => (request.path.as_str(), None),
         }
     } else {
-        (&path as &str, None, "404 Not Found")
+        (request.path.as_str(), None)
     };
 
     // Content type is derived from the key actually served, not the
     // requested route — so a fallback to the entrypoint gets `text/html`
     // even though the browser asked for `/about`.
     let content_type = guess_content_type(served_key);
-    let content_length = body.map(|b| b.len()).unwrap_or(0);
+    let connection = if request.close_after_response { "close" } else { "keep-alive" };
 
-    let header = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {content_length}\r\nConnection: close\r\n\r\n"
-    );
-    stream.write_all(header.as_bytes()).await?;
-    if let Some(body) = body {
-        stream.write_all(body).await?;
+    // Conditional GET/HEAD: if the client already holds the representation,
+    // answer 304 with no body. Evaluated before Range, per RFC 7232 §6 — a
+    // failing precondition makes the request a "precondition fail" regardless
+    // of a Range header.
+    let is_get_or_head = request.method == "GET" || request.method == "HEAD";
+    if let Some(etag) = etags.get(served_key) {
+        let matches = request
+            .if_none_match
+            .as_deref()
+            .map(|value| value.trim_matches('"') == etag)
+            .unwrap_or(false);
+        if is_get_or_head && matches {
+            let mut header = String::new();
+            push_header(
+                &mut header,
+                "304 Not Modified",
+                content_type,
+                None,
+                connection,
+            );
+            header.push_str(&format!("ETag: \"{etag}\"\r\n"));
+            header.push_str("\r\n");
+            return (header, None);
+        }
     }
-    Ok(())
+
+    let send_body = request.method == "GET";
+
+    let Some(body) = found else {
+        return (error_response("404 Not Found", content_type, connection, 0), None);
+    };
+    let body_len = body.len();
+
+    // Single-range requests (GET only): 206 for a satisfiable range, 416 for
+    // an unsatisfiable one. Multi-range and unknown-unit headers are ignored
+    // (full 200), which RFC 7233 §3.1 explicitly allows.
+    if request.method == "GET" {
+        if let Some(range) = parse_range(request.range.as_deref(), body_len) {
+            match range {
+                RangeSpec::Unsatisfiable => {
+                    let mut header = String::new();
+                    push_header(
+                        &mut header,
+                        "416 Range Not Satisfiable",
+                        content_type,
+                        Some(0),
+                        connection,
+                    );
+                    header.push_str("Accept-Ranges: bytes\r\n");
+                    header.push_str(&format!("Content-Range: bytes */{body_len}\r\n"));
+                    header.push_str("\r\n");
+                    return (header, None);
+                }
+                RangeSpec::Bytes(start, end) => {
+                    let part = body[start..=end].to_vec();
+                    let mut header = String::new();
+                    push_header(
+                        &mut header,
+                        "206 Partial Content",
+                        content_type,
+                        Some(part.len()),
+                        connection,
+                    );
+                    header.push_str("Accept-Ranges: bytes\r\n");
+                    header.push_str(&format!("Content-Range: bytes {start}-{end}/{body_len}\r\n"));
+                    if let Some(etag) = etags.get(served_key) {
+                        header.push_str(&format!("ETag: \"{etag}\"\r\n"));
+                    }
+                    header.push_str("\r\n");
+                    return (header, Some(part));
+                }
+            }
+        }
+    }
+
+    // Full representation: gzip compressible types when the client accepts gzip
+    // and gzip actually shrinks the body. Range and gzip are never combined —
+    // the Range path above returns first, so ranges describe the *stored*
+    // (uncompressed) bytes, which is what a parser seeing `Content-Encoding`
+    // would expect anyway.
+    let mut encoded = None;
+    if request.accepts_gzip && body_len >= MIN_COMPRESSIBLE_LEN && is_compressible(content_type) {
+        encoded = gzip_body(body).ok().filter(|gz| gz.len() < body_len);
+    }
+    let content_encoding = if encoded.is_some() { "gzip" } else { "" };
+    let payload: &[u8] = encoded.as_deref().unwrap_or(body);
+
+    let mut header = String::new();
+    push_header(
+        &mut header,
+        "200 OK",
+        content_type,
+        Some(payload.len()),
+        connection,
+    );
+    if let Some(etag) = etags.get(served_key) {
+        header.push_str(&format!("ETag: \"{etag}\"\r\n"));
+    }
+    header.push_str("Accept-Ranges: bytes\r\n");
+    // `Vary` is sent for every compressible media type — a shared cache must
+    // know a gzipped variant could be served for a different `Accept-Encoding`
+    // even when *this* response wasn't compressed. `Content-Encoding` only
+    // appears when gzip was actually applied.
+    if is_compressible(content_type) {
+        header.push_str("Vary: Accept-Encoding\r\n");
+        if !content_encoding.is_empty() {
+            header.push_str("Content-Encoding: gzip\r\n");
+        }
+    }
+    header.push_str("\r\n");
+
+    let body = if send_body { Some(payload.to_vec()) } else { None };
+    (header, body)
+}
+
+/// Appends the status line plus the always-present headers to `header`.
+/// `content_length` is omitted for 304 (which must not carry a body).
+fn push_header(
+    header: &mut String,
+    status: &str,
+    content_type: &str,
+    content_length: Option<usize>,
+    connection: &str,
+) {
+    header.push_str("HTTP/1.1 ");
+    header.push_str(status);
+    header.push_str("\r\nContent-Type: ");
+    header.push_str(content_type);
+    if let Some(len) = content_length {
+        header.push_str(&format!("\r\nContent-Length: {len}"));
+    }
+    header.push_str(&format!("\r\nConnection: {connection}\r\n"));
+}
+
+fn error_response(status: &str, content_type: &str, connection: &str, len: usize) -> String {
+    let mut header = String::new();
+    push_header(&mut header, status, content_type, Some(len), connection);
+    header.push_str("\r\n");
+    header
+}
+
+enum RangeSpec {
+    /// A syntactically valid range no bytes satisfy (e.g. start past EOF).
+    Unsatisfiable,
+    Bytes(usize, usize),
+}
+
+/// Parses a `Range: bytes=A-B` header value into a single inclusive range or
+/// `Unsatisfiable`. Returns `None` for headers the server is allowed to
+/// ignore (multi-range lists, unknown units, malformed values) — the full 200
+/// response is served instead.
+fn parse_range(header: Option<&str>, len: usize) -> Option<RangeSpec> {
+    // `header` is the raw `Range: bytes=...` line; split the key off so the
+    // unit check below sees the value only, in whatever case the client used.
+    let (_, spec) = header?.trim().split_once(':')?;
+    let spec = spec.trim();
+    const UNIT: &str = "bytes=";
+    if spec.len() < UNIT.len() || !spec[..UNIT.len()].eq_ignore_ascii_case(UNIT) {
+        return None;
+    }
+    let value = &spec[UNIT.len()..];
+
+    // Multi-range lists are out of scope: ignore (serve 200).
+    if value.contains(',') {
+        return None;
+    }
+
+    let (start_str, end_str) = match value.split_once('-') {
+        Some((start, end)) => (start, end),
+        None => (value, ""),
+    };
+
+    // `bytes=-N`: the last N bytes (suffix range).
+    if start_str.is_empty() {
+        if len == 0 {
+            return Some(RangeSpec::Unsatisfiable);
+        }
+        let n = end_str.parse::<u64>().ok()?;
+        if n == 0 {
+            return Some(RangeSpec::Unsatisfiable);
+        }
+        let take = n.min(len as u64) as usize;
+        return Some(RangeSpec::Bytes(len - take, len - 1));
+    }
+
+    let start = start_str.parse::<u64>().ok()? as usize;
+    if start >= len {
+        return Some(RangeSpec::Unsatisfiable);
+    }
+
+    let end = if end_str.is_empty() {
+        len - 1
+    } else {
+        // `bytes=A-B`: a malformed start > end is ignored (serve 200).
+        let end = end_str.parse::<u64>().ok()? as usize;
+        if end < start {
+            return None;
+        }
+        end.min(len - 1)
+    };
+
+    Some(RangeSpec::Bytes(start, end))
+}
+
+/// gzip-compresses `body` into a new vec (returns the gzip bytes).
+fn gzip_body(body: &[u8]) -> std::io::Result<Vec<u8>> {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+    let mut encoder = GzEncoder::new(Vec::with_capacity(body.len()), Compression::default());
+    encoder.write_all(body)?;
+    encoder.finish()
+}
+
+/// Text-ish media types worth compressing; binary formats (fonts, images,
+/// video, wasm) are already compressed and get nothing but wasted CPU.
+fn is_compressible(content_type: &str) -> bool {
+    content_type == "application/javascript"
+        || content_type == "application/json"
+        || content_type == "image/svg+xml"
+        || content_type.starts_with("text/")
 }
 
 fn guess_content_type(path: &str) -> &'static str {
@@ -324,29 +662,50 @@ fn is_asset_request(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use canopee_storage::ObjectId;
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    #[tokio::test]
-    async fn serves_index_and_assets() {
-        let mut files = HashMap::new();
-        files.insert("/".to_string(), b"<h1>hi</h1>".to_vec());
-        files.insert("/style.css".to_string(), b"h1{color:red}".to_vec());
-
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let files = Arc::new(files);
+    /// Starts a server on an ephemeral port with `files` and returns its addr.
+    async fn spawn_server(files: HashMap<String, Vec<u8>>) -> std::net::SocketAddr {
+        let etags = compute_etags(&files);
+        let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tx.send(addr).unwrap();
+            let files = Arc::new(files);
+            let etags = Arc::new(etags);
             loop {
                 let (stream, _) = listener.accept().await.unwrap();
                 let files = files.clone();
+                let etags = etags.clone();
                 tokio::spawn(async move {
-                    handle_connection(stream, &files).await.unwrap();
+                    handle_connection(stream, &files, &etags).await.unwrap();
                 });
             }
         });
+        rx.await.unwrap()
+    }
+
+    fn sample_files() -> HashMap<String, Vec<u8>> {
+        let mut files = HashMap::new();
+        files.insert("/".to_string(), b"<div id=root>app</div>".to_vec());
+        files.insert("/style.css".to_string(), format!("h1{{color:red}}/*{}*/", "a".repeat(500)).into_bytes());
+        files.insert("/assets/app.js".to_string(), b"console.log('hi')".to_vec());
+        files.insert("/video.mp4".to_string(), (0..10u8).collect());
+        files.insert("/img.png".to_string(), std::iter::repeat_n(b'\xff', 512).collect());
+        files
+    }
+
+    #[tokio::test]
+    async fn serves_index_and_assets() {
+        let addr = spawn_server(sample_files()).await;
 
         let (status, body) = http_request(&addr, "/").await;
         assert!(status.contains(" 200 "), "got {status}");
-        assert!(body.contains("hi"));
+        assert!(body.contains("app"));
         let (status, css) = http_request(&addr, "/style.css").await;
         assert!(status.contains(" 200 "), "got {status}");
         assert!(css.contains("color:red"));
@@ -354,22 +713,7 @@ mod tests {
 
     #[tokio::test]
     async fn spa_fallback_serves_entrypoint_for_routes_and_404s_missing_assets() {
-        let mut files = HashMap::new();
-        files.insert("/".to_string(), b"<div id=root>app</div>".to_vec());
-        files.insert("/assets/app.js".to_string(), b"console.log('hi')".to_vec());
-
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let files = Arc::new(files);
-        tokio::spawn(async move {
-            loop {
-                let (stream, _) = listener.accept().await.unwrap();
-                let files = files.clone();
-                tokio::spawn(async move {
-                    handle_connection(stream, &files).await.unwrap();
-                });
-            }
-        });
+        let addr = spawn_server(sample_files()).await;
 
         // Route-shaped path missing from `files` -> served the entrypoint.
         let (status, content_type, body) = http_request_with_ct(&addr, "/about").await;
@@ -386,6 +730,160 @@ mod tests {
         let (status, _content_type, _body) =
             http_request_with_ct(&addr, "/assets/does-not-exist.js").await;
         assert!(status.contains(" 404 "), "missing asset must not silently fall back");
+    }
+
+    #[tokio::test]
+    async fn range_requests_serve_partial_content() {
+        let addr = spawn_server(sample_files()).await;
+
+        // `bytes=A-B`: inclusive both ends.
+        let (status, headers, body) =
+            http_request_full(&addr, "GET", "/video.mp4", &[("Range", "bytes=2-4"), ("Connection", "close")]).await;
+        assert!(status.contains(" 206 "), "got {status}");
+        assert_eq!(headers["content-range"], "bytes 2-4/10");
+        assert_eq!(body, vec![2, 3, 4]);
+
+        // `bytes=A-`: to the end of the file.
+        let (_status, _headers, body) =
+            http_request_full(&addr, "GET", "/video.mp4", &[("Range", "bytes=7-"), ("Connection", "close")]).await;
+        assert_eq!(body, vec![7, 8, 9]);
+
+        // `bytes=-N`: the last N bytes.
+        let (_status, headers, body) =
+            http_request_full(&addr, "GET", "/video.mp4", &[("Range", "bytes=-4"), ("Connection", "close")]).await;
+        assert_eq!(headers["content-range"], "bytes 6-9/10");
+        assert_eq!(body, vec![6, 7, 8, 9]);
+
+        // Unsatisfiable range -> 416 with a byte *unknown* size.
+        let (status, headers, _body) =
+            http_request_full(&addr, "GET", "/video.mp4", &[("Range", "bytes=20-"), ("Connection", "close")]).await;
+        assert!(status.contains(" 416 "), "got {status}");
+        assert_eq!(headers["content-range"], "bytes */10");
+
+        // Every 200/206 advertises range support.
+        let (_status, headers, _body) =
+            http_request_full(&addr, "GET", "/video.mp4", &[("Connection", "close")]).await;
+        assert_eq!(headers["accept-ranges"], "bytes");
+    }
+
+    #[tokio::test]
+    async fn gzip_compresses_compressible_assets_when_accepted() {
+        let addr = spawn_server(sample_files()).await;
+
+        let (status, headers, body) = http_request_full(
+            &addr,
+            "GET",
+            "/style.css",
+            &[("Accept-Encoding", "gzip"), ("Connection", "close")],
+        )
+        .await;
+        assert!(status.contains(" 200 "), "got {status}");
+        assert_eq!(headers["content-encoding"], "gzip");
+        assert_eq!(headers["vary"], "Accept-Encoding");
+
+        let mut decoded = Vec::new();
+        GzDecoder::new(&body[..]).read_to_end(&mut decoded).unwrap();
+        assert_eq!(decoded, sample_files()["/style.css"]);
+
+        // Not compressed when the client doesn't ask, but still `Vary`s so a shared
+        // cache knows a gzip variant could appear; already-binary types get
+        // neither.
+        let (_status, headers, body) =
+            http_request_full(&addr, "GET", "/style.css", &[("Connection", "close")]).await;
+        assert!(!headers.contains_key("content-encoding"));
+        assert_eq!(headers["vary"], "Accept-Encoding");
+        assert_eq!(body, sample_files()["/style.css"]);
+
+        let (_status, headers, _body) = http_request_full(
+            &addr,
+            "GET",
+            "/img.png",
+            &[("Accept-Encoding", "gzip"), ("Connection", "close")],
+        )
+        .await;
+        assert!(!headers.contains_key("content-encoding"), "png must not be gzipped");
+        assert!(!headers.contains_key("vary"), "png must not advertise gzip variants");
+    }
+
+    #[tokio::test]
+    async fn head_returns_headers_without_body() {
+        let addr = spawn_server(sample_files()).await;
+
+        let (status, headers, body) =
+            http_request_full(&addr, "HEAD", "/style.css", &[("Connection", "close")]).await;
+        assert!(status.contains(" 200 "), "got {status}");
+        let get_len = headers["content-length"].parse::<usize>().unwrap();
+        assert!(body.is_empty(), "HEAD must not send a body");
+
+        // The reported length must match what a GET would deliver.
+        let (_status, get_headers, get_body) =
+            http_request_full(&addr, "GET", "/style.css", &[("Connection", "close")]).await;
+        assert_eq!(get_len, get_body.len());
+        assert_eq!(
+            get_headers["content-length"].parse::<usize>().unwrap(),
+            get_body.len(),
+            "GET must deliver exactly the Content-Length HEAD advertised"
+        );
+    }
+
+    #[tokio::test]
+    async fn etag_and_conditional_get_return_304() {
+        let addr = spawn_server(sample_files()).await;
+
+        let (_status, headers, body) =
+            http_request_full(&addr, "GET", "/", &[("Connection", "close")]).await;
+        let etag = headers["etag"].clone();
+        assert!(etag.starts_with('"'));
+        assert!(!body.is_empty());
+
+        // A GET that declares it already has the etag -> 304, no body.
+        let (status, headers, body) = http_request_full(
+            &addr,
+            "GET",
+            "/",
+            &[("If-None-Match", &etag), ("Connection", "close")],
+        )
+        .await;
+        assert!(status.contains(" 304 "), "got {status}");
+        assert!(body.is_empty());
+        assert_eq!(headers["etag"], etag);
+
+        // A *different* etag -> full 200.
+        let (status, body) = http_request(&addr, "/").await;
+        assert!(status.contains(" 200 "), "got {status}");
+        assert!(body.contains("app"));
+
+        // The etag is the object's content identity (SHA-256), so a file whose
+        // bytes are already content-addressed matches compute_etags directly.
+        let derived = format!("\"{}\"", ObjectId::from_data(&sample_files()["/"]).0);
+        assert_eq!(etag, derived);
+    }
+
+    #[tokio::test]
+    async fn keep_alive_serves_multiple_requests_on_one_connection() {
+        let addr = spawn_server(sample_files()).await;
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = tokio::io::BufReader::new(read_half);
+
+        write_half
+            .write_all(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n")
+            .await
+            .unwrap();
+        let (status, _headers, body) = read_response(&mut reader).await;
+        assert!(status.contains(" 200 "));
+        assert!(String::from_utf8_lossy(&body).contains("app"));
+
+        // Second request on the same connection.
+        write_half
+            .write_all(b"GET /style.css HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let (status, headers, body) = read_response(&mut reader).await;
+        assert!(status.contains(" 200 "), "got {status}");
+        assert_eq!(headers["connection"], "close");
+        assert_eq!(body, sample_files()["/style.css"]);
     }
 
     #[test]
@@ -456,42 +954,90 @@ mod tests {
         );
     }
 
-    async fn raw_get(addr: &std::net::SocketAddr, path: &str) -> String {
-        use tokio::io::AsyncReadExt;
-        let mut stream = TcpStream::connect(addr).await.unwrap();
-        stream
-            .write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes())
-            .await
-            .unwrap();
-        let mut buf = Vec::new();
-        stream.read_to_end(&mut buf).await.unwrap();
-        String::from_utf8_lossy(&buf).to_string()
+    /// Sends one request over a fresh connection (default `Connection: close`)
+    /// and reads the whole response into (status line, header map, body).
+    /// `method` is `"GET"` (or `"HEAD"` for header-only requests).
+    async fn http_request_full(
+        addr: &std::net::SocketAddr,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+    ) -> (String, HashMap<String, String>, Vec<u8>) {
+        let mut request = format!("{method} {path} HTTP/1.1\r\nHost: x\r\n");
+        for (k, v) in headers {
+            request.push_str(&format!("{k}: {v}\r\n"));
+        }
+        request.push_str("\r\n");
+
+        let mut stream = TcpStream::connect(*addr).await.unwrap();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+        parse_response(&response)
     }
 
-    /// Returns (status line, content-type, body) from a raw HTTP response.
-    fn parse_response(response: &str) -> (String, String, String) {
-        let mut parts = response.splitn(2, "\r\n\r\n");
-        let head = parts.next().unwrap_or("");
-        let body = parts.next().unwrap_or("").to_string();
+    /// Parses a captured response into (status line, headers, body bytes).
+    fn parse_response(response: &[u8]) -> (String, HashMap<String, String>, Vec<u8>) {
+        let head_end = response
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map(|i| i + 4)
+            .unwrap_or(response.len());
+        let head = std::str::from_utf8(&response[..head_end]).unwrap_or("");
+        let body = response[head_end..].to_vec();
         let mut lines = head.split("\r\n");
         let status = lines.next().unwrap_or("").to_string();
-        let content_type = lines
-            .find_map(|line| line.strip_prefix("Content-Type:"))
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        (status, content_type, body)
+        let mut headers = HashMap::new();
+        for line in lines {
+            if let Some((key, value)) = line.split_once(':') {
+                headers.insert(key.trim().to_ascii_lowercase(), value.trim().to_string());
+            }
+        }
+        (status, headers, body)
+    }
+
+    /// Reads one complete HTTP response from an existing connection, honoring
+    /// `Content-Length` so a keep-alive connection stays usable afterwards.
+    async fn read_response(
+        reader: &mut tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
+    ) -> (String, HashMap<String, String>, Vec<u8>) {
+        let mut head = String::new();
+        loop {
+            let mut line = String::new();
+            let n = reader.read_line(&mut line).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            head.push_str(&line);
+            if line == "\r\n" || line == "\n" {
+                break;
+            }
+        }
+        let (status, mut headers, _) = parse_response(head.as_bytes());
+        let mut body = Vec::new();
+        if status.contains(" 200 ") || status.contains(" 206 ") || status.contains(" 416 ") {
+            let len = headers
+                .get("content-length")
+                .map(|l| l.parse::<usize>().unwrap())
+                .unwrap_or(0);
+            body.resize(len, 0);
+            reader.read_exact(&mut body).await.unwrap();
+        }
+        (status, headers, body)
     }
 
     async fn http_request(addr: &std::net::SocketAddr, path: &str) -> (String, String) {
-        let (status, _, body) = parse_response(&raw_get(addr, path).await);
-        (status, body)
+        let (status, _, body) = http_request_full(addr, "GET", path, &[("Connection", "close")]).await;
+        (status, String::from_utf8_lossy(&body).to_string())
     }
 
     async fn http_request_with_ct(
         addr: &std::net::SocketAddr,
         path: &str,
     ) -> (String, String, String) {
-        parse_response(&raw_get(addr, path).await)
+        let (status, headers, body) =
+            http_request_full(addr, "GET", path, &[("Connection", "close")]).await;
+        let content_type = headers.get("content-type").cloned().unwrap_or_default();
+        (status, content_type, String::from_utf8_lossy(&body).to_string())
     }
 }

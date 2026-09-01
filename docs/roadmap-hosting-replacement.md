@@ -72,14 +72,31 @@ way at all). This is the single biggest unstarted item on this list.
 
 `serve()` reads a whole file into memory and writes it in one `write_all`
 call — fine for a portfolio, not fine for a video or a large dataset.
-Missing, in roughly the order you'd hit them in practice:
-- **Range requests** (`Range`/`Content-Range` headers) — needed for video
-  seeking, resumable downloads, and how browsers already expect large
-  files to behave.
-- **Compression** (`gzip`/`brotli` `Content-Encoding`) — text assets
-  (JS/CSS) served uncompressed cost real load time.
-- **HTTP/2 or better** — the current server is HTTP/1.1 with
-  `Connection: close` on every response; no keep-alive, no multiplexing.
+Done in [`canopee-cli/src/app.rs`](../crates/canopee-cli/src/app.rs), in the
+order you hit them:
+- **Keep-alive persistent connections** — multiple requests per connection
+  (honoring the client's `Connection` header, with an idle timeout), instead
+  of `Connection: close` on every response.
+- **Range requests** (`Range`/`Content-Range`) — single-byte-range 206
+  responses, 416 for unsatisfiable ranges, `Accept-Ranges: bytes` advertised;
+  needed for video seeking, resumable downloads, and large-file behavior.
+- **Compression** (`gzip` `Content-Encoding`) — text assets (JS/CSS HTML)
+  served gzipped when the client accepts it, with `Vary: Accept-Encoding`;
+  binary formats skipped.
+- **`ETag` + 304 conditional revalidation** — the ETag is the object's
+  SHA-256 content identity, so browser caching and object identity share one
+  value; stale-condition GETs answer 304 with no body.
+- **`HEAD` without a body** — headers (`Content-Length`, etc.) still match a
+  GET. Non-GET/non-HEAD methods are still answered like GET (read-only host).
+
+Still open:
+- **HTTP/2 or better** — the server is HTTP/1.1 (now keep-alive, but no
+  multiplexing / server push). A real HTTP stack (hyper/h2) is a significant
+  refactor of the hand-rolled server; documented, not yet undertaken.
+- **`brotli`** — browsers benefit modestly over gzip for text; adds a pure
+  native dependency; deferred in favor of gzip.
+- **Multi-range and `If-Range`** — out of scope, explicitly allowed to be
+  ignored per RFC 7233 §3.1 (multi-range falls back to a full 200).
 - **Edge/CDN-style caching** — a hosting provider puts your content
   physically close to every visitor. Canopee's caching tutorial gets you
   *replication* (more nodes have a copy), which is a meaningfully

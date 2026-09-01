@@ -12,6 +12,7 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 walkdir = "2"
 futures = "0.3"
+flate2 = "1"
 
 canopee-identity = { path = "../canopee-identity" }
 canopee-storage = { path = "../canopee-storage" }
