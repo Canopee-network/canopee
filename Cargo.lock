@@ -343,6 +343,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "canopee-gateway"
+version = "0.1.0"
+
+[[package]]
 name = "canopee-identity"
 version = "0.1.0"
 dependencies = [
