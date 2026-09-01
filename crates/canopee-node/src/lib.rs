@@ -6,6 +6,17 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast;
 use tokio::task::JoinSet;
 
+/// Maximum bytes the cache may hold before the periodic sweep starts evicting
+/// least-recently-served cached objects. Default 256 MiB; override with
+/// `CANOPEE_CACHE_MAX_MB`.
+fn cache_cap_bytes() -> u64 {
+    let mb = std::env::var("CANOPEE_CACHE_MAX_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    let mb = mb.unwrap_or(256);
+    mb.saturating_mul(1024 * 1024)
+}
+
 #[derive(Clone)]
 pub struct Node {
     runtime: Arc<Runtime>,
@@ -36,9 +47,14 @@ impl Node {
         let mut shutdown = self.shutdown.subscribe();
         let mut tasks: JoinSet<()> = JoinSet::new();
         self.runtime.mark_started().await?;
+        let cap = cache_cap_bytes();
+        let mut sweep = tokio::time::interval(std::time::Duration::from_secs(30));
 
         loop {
             tokio::select! {
+                _ = sweep.tick() => {
+                    self.evict_if_over_cap(cap).await;
+                }
                 result = listener.accept() => {
                     let (stream, _) = result?;
                     let node = self.clone();
@@ -71,6 +87,31 @@ impl Node {
         }
 
         Ok(())
+    }
+
+    /// Periodic cache-maintenance sweep: if the total bytes held by cached
+    /// (non-owned) objects exceeds `cap`, evict least-recently-served cached
+    /// objects until it's back under the cap. Never touches objects owned by
+    /// this node's own identity.
+    async fn evict_if_over_cap(&self, cap: u64) {
+        loop {
+            let total = self.runtime.cached_bytes().await;
+            if total <= cap {
+                break;
+            }
+            let Some(object) = self.runtime.lru_cached().await.into_iter().next() else {
+                break;
+            };
+            let id = object.id.clone();
+            println!(
+                "Evicting cached object {id} ({} bytes; cached total {total} > cap {cap})",
+                object.payload.metadata.size
+            );
+            if let Err(e) = self.runtime.evict(&id).await {
+                eprintln!("Failed to evict cached object {id}: {e}");
+                break;
+            }
+        }
     }
 
     async fn read_command(&self, stream: &mut UnixStream) -> anyhow::Result<NodeCommand> {
@@ -374,4 +415,107 @@ async fn test_node_put() {
         .await;
 
     println!("{:?}", response);
+}
+
+#[cfg(test)]
+mod eviction_tests {
+    use super::*;
+    use canopee_identity::Identity;
+    use canopee_storage::{Export, Object, ObjectId, ObjectType};
+    use std::sync::{Arc, Once};
+
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static SETUP: Once = Once::new();
+
+    fn scratch_home() -> &'static std::path::PathBuf {
+        SETUP.call_once(|| {
+            let home = std::env::temp_dir().join(format!("canopee_node_test_{}", std::process::id()));
+            std::fs::create_dir_all(&home).unwrap();
+            unsafe {
+                std::env::set_var("HOME", &home);
+            }
+        });
+        static HOME: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        HOME.get_or_init(|| {
+            std::env::temp_dir().join(format!("canopee_node_test_{}", std::process::id()))
+        })
+    }
+
+    async fn imported_object(runtime: &Runtime, data: &[u8]) -> (ObjectId, Object) {
+        let other_dir = std::env::temp_dir()
+            .join(format!("canopee_node_test_other_{}", std::process::id()));
+        std::fs::create_dir_all(&other_dir).unwrap();
+        let other = Arc::new(
+            Identity::create(other_dir.join(format!("{}.key", data.len())).to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let object = Object::new(&other, data.to_vec(), ObjectType::Blob);
+        let id = object.id.clone();
+        runtime.import(object.export().unwrap()).await.unwrap();
+        (id, object)
+    }
+
+    #[tokio::test]
+    async fn evicts_oldest_cached_until_under_cap() {
+        let _guard = LOCK.lock().unwrap();
+        let _ = scratch_home();
+        let runtime = Runtime::open().await.unwrap();
+        let node = Node::new(runtime);
+        let runtime = node.runtime.clone();
+
+        // Small cap: 8 KiB. Two cached objects at 64 KiB each + one owned.
+        unsafe {
+            std::env::set_var("CANOPEE_CACHE_MAX_MB", "0");
+        }
+        let (old_id, _) = imported_object(&runtime, &vec![0u8; 64 * 1024]).await;
+        let (new_id, _) = imported_object(&runtime, &vec![1u8; 64 * 1024]).await;
+        let owned = runtime.put_object(vec![2u8; 64 * 1024], ObjectType::Blob).await.unwrap();
+
+        assert!(runtime.cached_bytes().await > 0);
+
+        node.evict_if_over_cap(cache_cap_bytes()).await;
+
+        // Both cached objects are evicted (each exceeds the 8 KiB cap on its
+        // own), the owned object stays.
+        assert!(!runtime.storage.exists(&old_id).await);
+        assert!(!runtime.storage.exists(&new_id).await);
+        assert!(runtime.storage.exists(&owned.id).await);
+        assert!(runtime.cache.is_owned(&owned));
+        assert_eq!(runtime.cached_bytes().await, 0);
+    }
+
+    #[tokio::test]
+    async fn never_evicts_owned_objects() {
+        let _guard = LOCK.lock().unwrap();
+        let _ = scratch_home();
+        let runtime = Runtime::open().await.unwrap();
+        let node = Node::new(runtime);
+        let runtime = node.runtime.clone();
+
+        unsafe {
+            std::env::set_var("CANOPEE_CACHE_MAX_MB", "0");
+        }
+        let owned = runtime.put_object(vec![3u8; 64 * 1024], ObjectType::Blob).await.unwrap();
+        assert_eq!(runtime.cached_bytes().await, 0);
+
+        node.evict_if_over_cap(cache_cap_bytes()).await;
+
+        assert!(
+            runtime.storage.exists(&owned.id).await,
+            "eviction must never touch owned objects"
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_cap_bytes_parses_env() {
+        unsafe {
+            std::env::set_var("CANOPEE_CACHE_MAX_MB", "4");
+        }
+        assert_eq!(cache_cap_bytes(), 4 * 1024 * 1024);
+        unsafe {
+            std::env::set_var("CANOPEE_CACHE_MAX_MB", "junk");
+        }
+        assert_eq!(cache_cap_bytes(), 256 * 1024 * 1024);
+    }
 }

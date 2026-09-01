@@ -48,6 +48,11 @@ enum Commands {
     Announce {
         id: String,
     },
+    /// Lists peer ids that have announced themselves as providers of the
+    /// given object on the DHT.
+    FindProviders {
+        id: String,
+    },
     Publish {
         topic: String,
         message: String,
@@ -353,6 +358,28 @@ async fn main() {
             }
         }
 
+        Commands::FindProviders { id } => {
+            let object_id = ObjectId::new(&id);
+            let client = NodeClient::new().await.unwrap();
+            let response = client
+                .request(NodeCommand::FindProviders { id: object_id })
+                .await
+                .unwrap();
+
+            match response {
+                NodeResponse::Providers { peer_ids } => {
+                    if peer_ids.is_empty() {
+                        println!("No providers found for {id}");
+                    }
+                    for peer_id in peer_ids {
+                        println!("{}", peer_id);
+                    }
+                }
+                NodeResponse::Error { message } => eprintln!("Error: {}", message),
+                _ => {}
+            }
+        }
+
         Commands::Publish { topic, message } => {
             let client = NodeClient::new().await.unwrap();
             let response = client
@@ -487,7 +514,13 @@ async fn main() {
                 _ => panic!("pass either <id> or both --owner and --name"),
             };
 
-            let (manifest, files) = fetch_app(&client, manifest_id, peer).await.unwrap();
+            let (manifest, files) = match fetch_app(&client, manifest_id, peer).await {
+                Ok(app) => app,
+                Err(e) => {
+                    eprintln!("Error: failed to open app: {e:#}");
+                    std::process::exit(1);
+                }
+            };
 
             println!("Opening \"{}\" by {}", manifest.name, manifest.owner);
             serve(files, port).await.unwrap();

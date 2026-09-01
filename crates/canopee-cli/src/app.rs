@@ -37,26 +37,30 @@ pub async fn publish_directory(
     Ok((entrypoint, assets))
 }
 
-/// Resolves a peer to fetch `id` from: `peer` if given, otherwise the first
-/// provider found on the DHT for `id`.
-async fn resolve_peer(
+/// Resolves peers that can serve `id`: returns the explicit `peer` hint
+/// first (if given), then every provider found on the DHT for `id`.
+async fn resolve_providers(
     client: &CanopeeClient,
     id: &ObjectId,
     peer: Option<&str>,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<Vec<String>> {
+    let mut providers: Vec<String> = Vec::new();
     if let Some(peer) = peer {
-        return Ok(peer.to_string());
+        providers.push(peer.to_string());
     }
-    let providers = client.find_providers(id.clone()).await?;
-    providers
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("no providers found for {id}; try passing --peer"))
+    let dht_providers = client.find_providers(id.clone()).await?;
+    for p in dht_providers {
+        if !providers.contains(&p) {
+            providers.push(p);
+        }
+    }
+    Ok(providers)
 }
 
-/// Reads an object from local storage, falling back to fetching it from
-/// `peer` (discovering a provider via the DHT if none was given) and
-/// importing it locally.
+/// Reads an object from local storage, falling back to fetching it from a
+/// peer (trying multiple candidates if the first is offline) and importing
+/// it locally. After a successful import from a remote peer, announces
+/// this node as an additional provider and marks the object as cached.
 async fn get_or_fetch(
     client: &CanopeeClient,
     id: &ObjectId,
@@ -66,10 +70,31 @@ async fn get_or_fetch(
         return Ok(object);
     }
 
-    let peer_id = resolve_peer(client, id, peer).await?;
-    let bundle = client.fetch_object(peer_id, id.clone()).await?;
-    client.import(bundle.clone()).await?;
-    Ok(bundle.object)
+    let providers = resolve_providers(client, id, peer).await?;
+    if providers.is_empty() {
+        anyhow::bail!("no providers found for {id}; try passing --peer");
+    }
+
+    let mut last_err = anyhow::anyhow!("no providers available");
+    for peer_id in &providers {
+        match client.fetch_object(peer_id, id.clone()).await {
+            Ok(bundle) => {
+                // Import (the node auto-marks non-owned objects as cached)
+                // then announce as a provider — best-effort: a failed announce
+                // should not fail the fetch itself.
+                client.import(bundle).await?;
+                if let Err(e) = client.announce(id.clone()).await {
+                    eprintln!("Warning: failed to announce {id} as provider: {e}");
+                }
+                return client.get(id.clone()).await;
+            }
+            Err(e) => {
+                last_err = e;
+                continue;
+            }
+        }
+    }
+    Err(last_err)
 }
 
 /// Resolves an app manifest and every object it references (entrypoint +
@@ -84,13 +109,9 @@ pub async fn fetch_app(
     let manifest_object = get_or_fetch(client, &manifest_id, peer.as_deref()).await?;
     let manifest: AppManifest = manifest_object.decode()?;
 
-    // Once we know who's serving the manifest, reuse that peer for every
-    // other object instead of re-resolving a provider per asset.
-    let peer = match peer {
-        Some(peer) => Some(peer),
-        None => client.find_providers(manifest_id).await?.into_iter().next(),
-    };
-
+    // Use the `peer` hint (if given) for every referenced object; otherwise
+    // let each object resolve its own provider set from the DHT (a cache node
+    // holding one asset may not hold another).
     let entrypoint = get_or_fetch(client, &manifest.entrypoint, peer.as_deref()).await?;
     let mut files = HashMap::new();
     files.insert("/".to_string(), entrypoint.payload.data);

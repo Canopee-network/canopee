@@ -255,14 +255,64 @@ confirming the earlier steps actually compose the way you designed them to.
 
 Work through these in order; each depends on the previous one working:
 
-- [ ] Step 1 — `get_or_fetch` announces after every successful import
-- [ ] Step 2 — fetching tries multiple providers, not just the first
-- [ ] Step 3 — cached objects are distinguishable from owned ones
-- [ ] Step 4 — a bounded cache with an eviction policy that never touches
+- [x] Step 1 — `get_or_fetch` announces after every successful import
+      (best-effort: a failed announce logs a warning but doesn't fail the
+      fetch; the announce is added inside `get_or_fetch` in
+      `crates/canopee-cli/src/app.rs` right after `client.import(...)`)
+- [x] Step 2 — fetching tries multiple providers, not just the first
+      (`resolve_providers` puts an explicit `--peer` hint first, then every
+      provider `find_providers` returns; `get_or_fetch` iterates them until
+      one succeeds and only errors once *all* candidates have failed)
+- [x] Step 3 — cached objects are distinguishable from owned ones
+      (a `cache.cache` sidecar next to `storage/` — see `Config::cache_path`
+      in `crates/canopee-config/src/lib.rs` — records
+      `object_id -> CachedEntry { created_at, last_served_at }`. It's
+      bincode-serialized, so it survives restarts, and `Runtime::import`
+      auto-marks any object whose `payload.owner` isn't this node's identity)
+- [x] Step 4 — a bounded cache with an eviction policy that never touches
       owned objects
-- [ ] Step 5 — confirm pointer resolution survives the original publisher
+      (LRU-first eviction driven by `Node::run`'s 30s sweep in
+      `crates/canopee-node/src/lib.rs`, cap from `CANOPEE_CACHE_MAX_MB`,
+      default 256 MiB. Eviction deletes the object file, drops the sidecar
+      entry, and calls `stop_providing` via `NetworkManager::unannounce` so
+      the node stops advertising a record it can no longer serve)
+- [x] Step 5 — confirm pointer resolution survives the original publisher
       going offline, once enough peers have cached the app
+      (verified end-to-end: kill the publisher, then a fresh node's
+      `open --owner ... --name ...` with no `--peer` resolves the pointer,
+      runs `find_providers` on the manifest id, fails over to a cache node,
+      and serves the app)
 
 By the end, killing the original publisher's node mid-demo should no
 longer take the app down with it — that's the concrete, demoable proof
 this feature works.
+
+## Verified end-to-end (Alice / Pierre / Sam)
+
+With three nodes on one machine (separate `HOME` dirs, mDNS discovery),
+`CANOPEE_CACHE_MAX_MB` unset:
+
+1. Alice publishes `alice-portfolio`. Pierre runs
+   `open --owner <alice-id> --name alice-portfolio --peer <alice-peer>`.
+   `find-providers <manifest-id>` now lists **both** Alice's and Pierre's
+   peer ids.
+2. Kill Alice. A fresh node (Sam) runs the *same* `open` with **no**
+   `--peer`. It resolves the pointer, sees Alice's (dead) provider record
+   first, falls through to Pierre's cached copy, imports and serves it, and
+   announces itself — `find-providers` now lists Sam too.
+3. Restart Pierre with `CANOPEE_CACHE_MAX_MB=0`. Within the 30s sweep,
+   Alice's cached objects are evicted (files deleted, sidecar emptied,
+   `stop_providing` called) while Pierre's own `app-manifest` objects are
+   untouched; asking Pierre for an evicted id returns a clean
+   `NotFound`, not a crash.
+
+### Eviction detail: ordering by last-served
+
+The sidecar records a single timestamp per cached object — the unix time of
+its most recent serve (`CacheIndex.entries: object id hex -> last_served_at`).
+`Cache::lru_cached_objects` orders entries by that timestamp ascending, so
+eviction always picks the least-recently-served object first. There is no
+separate "imported at" timestamp: an object a node fetched but has never
+served sorts as least-recently-served (its own import time), which is the
+correct LRU signal. `touch_served` only updates entries that are actually
+tracked, so serving an owned object never pollutes the cached index.

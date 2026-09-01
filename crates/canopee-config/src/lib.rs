@@ -39,6 +39,14 @@ impl Config {
     pub fn state_path(&self) -> PathBuf {
         self.home_dir().join("state").join("node.state")
     }
+
+    /// Path to the cache index sidecar recording which locally stored objects
+    /// were fetched from other peers (vs. created by this node's identity)
+    /// and when each was last served, so the node can safely evict least
+    /// recently used cached objects without ever touching its own.
+    pub fn cache_path(&self) -> PathBuf {
+        self.home_dir().join("cache.cache")
+    }
 }
 
 impl Default for Config {

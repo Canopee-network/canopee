@@ -74,4 +74,14 @@ impl Storage {
     pub async fn import(&self, object: &Object) -> Result<()> {
         self.put_verified(object).await
     }
+
+    /// Removes a single object from storage by id. No-op if it doesn't exist.
+    pub async fn delete(&self, id: &ObjectId) -> Result<()> {
+        let path = format!("{}/{}", self.root, id.0);
+        // Missing is not an error — eviction races with other writers.
+        if fs::try_exists(&path).await.unwrap_or(false) {
+            fs::remove_file(path).await?;
+        }
+        Ok(())
+    }
 }

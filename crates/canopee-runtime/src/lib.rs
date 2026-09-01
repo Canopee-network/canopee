@@ -2,7 +2,7 @@ mod state;
 use canopee_config::Config;
 use canopee_identity::Identity;
 use canopee_network::{Multiaddr, NetworkManager, ObjectProvider};
-use canopee_storage::{Export, ExportBundle, Object, ObjectId, ObjectInfo, ObjectType, Storage};
+use canopee_storage::{Cache, CacheIndex, Export, ExportBundle, Object, ObjectId, ObjectInfo, ObjectType, Storage};
 use state::NodeState;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,17 +14,25 @@ pub struct Runtime {
     pub identity: Arc<Identity>,
     pub storage: Arc<Storage>,
     pub network: NetworkManager,
+    pub cache: Arc<Cache>,
     state: RwLock<NodeState>,
 }
 
 struct StorageObjectProvider {
     storage: Arc<Storage>,
+    cache: Arc<Cache>,
 }
 
 #[async_trait::async_trait]
 impl ObjectProvider for StorageObjectProvider {
     async fn get_object(&self, id: &ObjectId) -> Option<ExportBundle> {
         let object = self.storage.get_verified(id).await.ok()?;
+        // Touch the cache timestamp for cached (non-owned) objects when
+        // serving them to another peer — this is the "someone is actually
+        // using my cached copy" signal that drives LRU eviction.
+        if self.cache.is_cached(id).await {
+            self.cache.touch_served(id).await;
+        }
         object.export().ok()
     }
 }
@@ -66,9 +74,14 @@ impl Runtime {
         let storage = Arc::new(Storage::new(storage_path.to_str().unwrap()));
         let identity = Arc::new(identity);
 
+        let cache_path = config.cache_path();
+        let cache_index = CacheIndex::load(&cache_path).await;
+        let cache = Arc::new(Cache::new(cache_path, identity.id().clone(), cache_index));
+
         let listen_addr: Multiaddr = config.listen_addr().parse()?;
         let object_provider = Arc::new(StorageObjectProvider {
             storage: storage.clone(),
+            cache: cache.clone(),
         });
         let network = NetworkManager::new(identity.clone(), listen_addr, object_provider)?;
 
@@ -77,6 +90,7 @@ impl Runtime {
             identity,
             storage,
             network,
+            cache,
             state: RwLock::new(state),
         })
     }
@@ -184,8 +198,168 @@ impl Runtime {
         if exists {
             anyhow::bail!("Object already exists");
         }
+        let is_cached = export_bundle.object.payload.owner != *self.identity.id();
         self.storage.import(&export_bundle.object).await?;
-
+        if is_cached {
+            self.cache.mark_cached(&export_bundle.object.id).await;
+        }
         Ok(())
+    }
+
+    /// Deletes a single object from local storage, removes it from the cache
+    /// index, and withdraws this node as a DHT provider of it. Used when a
+    /// cached object is evicted.
+    pub async fn evict(&self, id: &ObjectId) -> anyhow::Result<()> {
+        self.storage.delete(id).await?;
+        self.cache.remove(id).await;
+        let _ = self.network.unannounce(id.clone()).await;
+        Ok(())
+    }
+
+    /// Total bytes currently held by cached (non-owned) objects.
+    pub async fn cached_bytes(&self) -> u64 {
+        self.cache.total_cached_bytes(&self.storage).await
+    }
+
+    /// Cached objects ordered least-recently-served first.
+    pub async fn lru_cached(&self) -> Vec<Object> {
+        self.cache.lru_cached_objects(&self.storage).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use canopee_identity::Identity;
+    use canopee_storage::ObjectType;
+    use std::sync::Once;
+
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static SETUP: Once = Once::new();
+
+    /// Points `HOME` at a scratch dir so `Runtime::open` and every peer it
+    /// spawns stay far away from the developer's real `~/.canopee`. Tests
+    /// that touch `Runtime` must hold `LOCK` (the env mutation is process
+    /// global), and share one `TEST_HOME` to only set the env var once.
+    fn with_scratch_home() -> &'static PathBuf {
+        SETUP.call_once(|| {
+            let dir = std::env::temp_dir().join(format!(
+                "canopee_runtime_test_{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            // Leak so `std::env::set_var` outlives the test.
+            let dir: &'static PathBuf = Box::leak(Box::new(dir));
+            unsafe {
+                std::env::set_var("HOME", dir);
+            }
+        });
+        static HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        HOME.get_or_init(|| {
+            std::env::temp_dir().join(format!("canopee_runtime_test_{}", std::process::id()))
+        })
+    }
+
+    #[tokio::test]
+    async fn import_marks_non_owned_object_as_cached() {
+        let _guard = LOCK.lock().unwrap();
+        let _ = with_scratch_home();
+        let runtime = Runtime::open().await.unwrap();
+
+        // An object created by a *different* identity, imported into this
+        // runtime.
+        let other_dir = std::env::temp_dir().join(format!(
+            "canopee_runtime_test_other_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&other_dir).unwrap();
+        let other = Arc::new(
+            Identity::create(other_dir.join("other.key").to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let object = Object::new(&other, b"borrowed bytes".to_vec(), ObjectType::Blob);
+        let bundle = object.export().unwrap();
+        let id = object.id.clone();
+
+        runtime.import(bundle).await.unwrap();
+
+        assert!(
+            runtime.cache.is_cached(&id).await,
+            "importing another owner's object must mark it as cached"
+        );
+        assert!(
+            runtime.storage.exists(&id).await,
+            "imported object should be on disk"
+        );
+    }
+
+    #[tokio::test]
+    async fn import_does_not_mark_own_object_as_cached() {
+        let _guard = LOCK.lock().unwrap();
+        let _ = with_scratch_home();
+        let runtime = Runtime::open().await.unwrap();
+
+        let object = runtime.put_object(b"mine".to_vec(), ObjectType::Blob).await.unwrap();
+        let id = object.id.clone();
+
+        // Own objects are never added to the cache index, so they can never
+        // be evicted (LRU only ever yields cached entries).
+        assert!(
+            !runtime.cache.is_cached(&id).await,
+            "objects owned by this identity must never be marked cached"
+        );
+        assert!(
+            runtime.cache.is_owned(&object),
+            "own objects must be considered owned"
+        );
+        assert!(
+            !runtime.lru_cached().await.iter().any(|o| o.id == id),
+            "own objects must not appear in the LRU eviction list"
+        );
+    }
+
+    #[tokio::test]
+    async fn evict_deletes_storage_and_cache_entry() {
+        let _guard = LOCK.lock().unwrap();
+        let _ = with_scratch_home();
+        let runtime = Runtime::open().await.unwrap();
+
+        let other_dir =
+            std::env::temp_dir().join(format!("canopee_runtime_evict_other_{}", std::process::id()));
+        std::fs::create_dir_all(&other_dir).unwrap();
+        let other = Arc::new(
+            Identity::create(other_dir.join("other.key").to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let object = Object::new(&other, b"temp".to_vec(), ObjectType::Blob);
+        let id = object.id.clone();
+        runtime.import(object.export().unwrap()).await.unwrap();
+        assert!(runtime.cache.is_cached(&id).await);
+
+        runtime.evict(&id).await.unwrap();
+
+        assert!(
+            !runtime.cache.is_cached(&id).await,
+            "evict must drop the cache index entry"
+        );
+        assert!(
+            !runtime.storage.exists(&id).await,
+            "evict must delete the object from storage"
+        );
+    }
+
+    #[tokio::test]
+    async fn evict_owned_object_is_allowed_only_through_explicit_evict() {
+        let _guard = LOCK.lock().unwrap();
+        let _ = with_scratch_home();
+        let runtime = Runtime::open().await.unwrap();
+
+        let mine = runtime.put_object(b"keep me".to_vec(), ObjectType::Blob).await.unwrap();
+        assert!(runtime.cache.is_owned(&mine));
+        // Owned objects are never *auto-marked* cached, so a plain eviction
+        // path won't touch them (LRU only yields cached entries).
+        assert!(!runtime.lru_cached().await.iter().any(|o| o.id == mine.id));
     }
 }

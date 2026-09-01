@@ -106,6 +106,7 @@ enum Command {
         reply: oneshot::Sender<Vec<PeerId>>,
     },
     Announce(ObjectId),
+    Unannounce(ObjectId),
     PutRecord {
         key: Vec<u8>,
         value: Vec<u8>,
@@ -121,6 +122,7 @@ enum Command {
         reply: oneshot::Sender<anyhow::Result<ExportBundle>>,
     },
     ListPeers(oneshot::Sender<Vec<Peer>>),
+    ListListenAddresses(oneshot::Sender<Vec<Multiaddr>>),
     ListRelayReservations(oneshot::Sender<Vec<RelayReservation>>),
     Subscribe(String, oneshot::Sender<anyhow::Result<()>>),
     Unsubscribe(String),
@@ -269,6 +271,15 @@ impl NetworkManager {
         Ok(())
     }
 
+    /// Withdraws this node as a provider of `object_id` on the DHT (used when
+    /// a cached object is evicted, so `find_providers` stops listing us as a
+    /// provider for something we no longer hold). Best-effort: if the node
+    /// is not currently connected to the DHT this is a no-op warning.
+    pub async fn unannounce(&self, object_id: ObjectId) -> anyhow::Result<()> {
+        self.commands.send(Command::Unannounce(object_id)).await?;
+        Ok(())
+    }
+
     /// Publishes an arbitrary, mutable DHT record under `key` (unlike
     /// `announce`, which just marks this node as a provider of an existing
     /// content-addressed object). Overwrites whatever was previously stored
@@ -311,6 +322,17 @@ impl NetworkManager {
     pub async fn peers(&self) -> anyhow::Result<Vec<Peer>> {
         let (reply, rx) = oneshot::channel();
         self.commands.send(Command::ListPeers(reply)).await?;
+        Ok(rx.await?)
+    }
+
+    /// Returns the addresses this node is actually bound to (one per
+    /// interface). Useful with an ephemeral listen port (e.g.
+    /// `/ip4/127.0.0.1/tcp/0`) to learn the real port after startup.
+    pub async fn listen_addresses(&self) -> anyhow::Result<Vec<Multiaddr>> {
+        let (reply, rx) = oneshot::channel();
+        self.commands
+            .send(Command::ListListenAddresses(reply))
+            .await?;
         Ok(rx.await?)
     }
 
@@ -367,6 +389,7 @@ async fn run_event_loop(
     pubsub: broadcast::Sender<PubSubMessage>,
 ) {
     let mut peers: HashMap<PeerId, Peer> = HashMap::new();
+    let mut listen_addrs: Vec<Multiaddr> = Vec::new();
     let mut relay_reservations: HashMap<PeerId, RelayReservation> = HashMap::new();
     let mut pending_get_providers: HashMap<kad::QueryId, oneshot::Sender<Vec<PeerId>>> =
         HashMap::new();
@@ -388,6 +411,7 @@ async fn run_event_loop(
                     event,
                     &mut swarm,
                     &mut peers,
+                    &mut listen_addrs,
                     &mut relay_reservations,
                     &mut pending_get_providers,
                     &mut pending_put_record,
@@ -407,6 +431,7 @@ async fn run_event_loop(
                     &mut pending_get_record,
                     &mut pending_get_object,
                     &peers,
+                    &listen_addrs,
                     &relay_reservations,
                 );
             }
@@ -428,6 +453,7 @@ fn handle_command(
         oneshot::Sender<anyhow::Result<ExportBundle>>,
     >,
     peers: &HashMap<PeerId, Peer>,
+    listen_addrs: &Vec<Multiaddr>,
     relay_reservations: &HashMap<PeerId, RelayReservation>,
 ) {
     match command {
@@ -435,6 +461,9 @@ fn handle_command(
             if let Err(e) = swarm.dial(addr.clone()) {
                 tracing::warn!("Failed to dial {addr}: {e}");
             }
+        }
+        Command::ListListenAddresses(reply) => {
+            let _ = reply.send(listen_addrs.clone());
         }
         Command::ListenViaRelay(relay_addr) => {
             let circuit_addr = relay_addr.with(libp2p::multiaddr::Protocol::P2pCircuit);
@@ -452,6 +481,10 @@ fn handle_command(
             if let Err(e) = swarm.behaviour_mut().kad.start_providing(key) {
                 tracing::warn!("Failed to announce object {object_id}: {e}");
             }
+        }
+        Command::Unannounce(object_id) => {
+            let key = kad::RecordKey::new(&object_id.0);
+            swarm.behaviour_mut().kad.stop_providing(&key);
         }
         Command::PutRecord { key, value, reply } => {
             let record = kad::Record::new(kad::RecordKey::new(&key), value);
@@ -523,6 +556,7 @@ async fn handle_swarm_event(
     event: SwarmEvent<CanopeeBehaviourEvent>,
     swarm: &mut libp2p::Swarm<CanopeeBehaviour>,
     peers: &mut HashMap<PeerId, Peer>,
+    listen_addrs: &mut Vec<Multiaddr>,
     relay_reservations: &mut HashMap<PeerId, RelayReservation>,
     pending_get_providers: &mut HashMap<kad::QueryId, oneshot::Sender<Vec<PeerId>>>,
     pending_put_record: &mut HashMap<kad::QueryId, oneshot::Sender<anyhow::Result<()>>>,
@@ -538,6 +572,32 @@ async fn handle_swarm_event(
     pubsub: &broadcast::Sender<PubSubMessage>,
 ) {
     match event {
+        SwarmEvent::NewListenAddr { address, .. } => {
+            if !listen_addrs.contains(&address) {
+                listen_addrs.push(address.clone());
+            }
+            if let Some(relay_peer_id) = relay_peer_id_from_circuit_addr(&address) {
+                let reservation = relay_reservations
+                    .entry(relay_peer_id)
+                    .or_insert_with(|| RelayReservation::new(relay_peer_id));
+                if !reservation.listen_addrs.contains(&address) {
+                    reservation.listen_addrs.push(address);
+                }
+            }
+        }
+        SwarmEvent::IncomingConnectionError {
+            connection_id: _,
+            local_addr,
+            send_back_addr: _,
+            error,
+        } => {
+            tracing::debug!("Incoming connection error on {local_addr}: {error}");
+        }
+        SwarmEvent::OutgoingConnectionError {
+            peer_id, error, ..
+        } => {
+            tracing::debug!("Outgoing connection error to {peer_id:?}: {error}");
+        }
         SwarmEvent::ConnectionEstablished {
             peer_id, endpoint, ..
         } => {
@@ -587,16 +647,6 @@ async fn handle_swarm_event(
                 .or_insert_with(|| RelayReservation::new(relay_peer_id));
             reservation.renewal = renewal;
             tracing::info!("Relay reservation accepted via {relay_peer_id} (renewal: {renewal})");
-        }
-        SwarmEvent::NewListenAddr { address, .. } => {
-            if let Some(relay_peer_id) = relay_peer_id_from_circuit_addr(&address) {
-                let reservation = relay_reservations
-                    .entry(relay_peer_id)
-                    .or_insert_with(|| RelayReservation::new(relay_peer_id));
-                if !reservation.listen_addrs.contains(&address) {
-                    reservation.listen_addrs.push(address);
-                }
-            }
         }
         SwarmEvent::Behaviour(CanopeeBehaviourEvent::Relay(relay_event)) => match relay_event {
             relay::Event::ReservationReqAccepted {
