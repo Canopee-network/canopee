@@ -618,6 +618,9 @@ async fn handle_swarm_event(
         SwarmEvent::ConnectionEstablished {
             peer_id, endpoint, ..
         } => {
+            if peer_id == *swarm.local_peer_id() {
+                return;
+            }
             peers.entry(peer_id).or_insert_with(|| Peer::new(peer_id));
             swarm
                 .behaviour_mut()
@@ -643,6 +646,9 @@ async fn handle_swarm_event(
             info,
             ..
         })) => {
+            if peer_id == *swarm.local_peer_id() {
+                return;
+            }
             for addr in &info.listen_addrs {
                 swarm
                     .behaviour_mut()
