@@ -78,6 +78,39 @@ let latest = client.resolve_app_pointer(owner_id, "alice-portfolio").await?; // 
 client.publish("app-topic", b"hello".to_vec()).await?;                   // gossipsub publish
 ```
 
+### User records ("state is per-app, data is per-user")
+
+```rust
+// Generic pointer.
+client.publish_pointer("app:demo", object_id).await?;
+let record = client.resolve_pointer(owner_id, "app:demo").await?;
+
+// Profile / contacts / home index (reserved record names are re-exported
+// as RECORD_PROFILE / RECORD_CONTACTS / RECORD_HOME).
+let id = client.save_profile(&profile).await?;
+let profile = client.load_profile().await?;          // Option<Profile>
+client.save_contact_list(&list).await?;
+let list = client.load_contact_list().await?;        // Option<ContactList>
+client.save_home_index(&index).await?;
+let index = client.load_home_index().await?;         // Option<HomeIndex>
+```
+
+Saving bakes a server-side version bump and repoints the reserved record —
+clients never sign anything themselves (the node holds the key).
+
+### Sharing gate
+
+```rust
+client.share_object("pic.png", id, Some("photos".into())).await?; // upsert a shared entry + announce
+client.set_home_entry_shared("pic.png", false).await?;            // flip one entry's flag
+client.unshare("pic.png").await?;                                  // shorthand for the above
+let index = client.load_home_index().await?;                      // see what's shared
+```
+
+`shared: true` entries mean the object is announced on the DHT and served
+to any peer; `false` entries are only ever in the owner's store. Nothing is
+shared by default.
+
 ### Pub/sub subscriptions
 
 `subscribe` returns a [`Subscription`] that streams messages until dropped:
@@ -134,6 +167,14 @@ protocol layer itself for a couple of commands. New apps should prefer
   unexpected response variant) into an `anyhow::Error` via one shared
   `unexpected()` helper, so callers get a consistent `anyhow::Result<T>`
   across the whole API regardless of which command failed.
+- `publish_app_pointer` only takes a `name` and a manifest `ObjectId` —
+  signing happens inside the node, not the SDK, because only the node holds
+  the private key behind its `Identity`. The same rule applies to the
+  user-record commands: `save_profile`/`save_contact_list`/`save_home_index`
+  send the raw struct, and the node's Runtime signs and repoints reserved
+  records. `resolve_app_pointer`/`resolve_pointer`, by contrast, verify
+  before returning, so a `None` means either nothing was published or what
+  came back failed verification.
 - `fetch_object` returns the `ExportBundle` but does **not** import it into
   local storage automatically — callers decide whether/when to persist a
   fetched object via `client.import(bundle)`. This keeps "fetch" and
@@ -141,14 +182,6 @@ protocol layer itself for a couple of commands. New apps should prefer
 - The streaming nature of `subscribe` is why it's the one method that
   doesn't go through the shared `request()` helper — it needs its own
   connection that stays open, which `Subscription::open` manages directly.
-- `publish_app_pointer` only takes a `name` and a manifest `ObjectId` —
-  signing happens inside the node, not the SDK, because only the node holds
-  the private key behind its `Identity`. `resolve_app_pointer`, by
-  contrast, calls `record.verify()` itself before returning
-  `Some(manifest)`, so callers never see an unverified pointer: a `None`
-  return means either nothing was published under that name, or what came
-  back failed verification (e.g. a peer tried to serve a pointer under a
-  name they don't actually own).
 
 ## Testing
 
@@ -158,7 +191,8 @@ cargo test -p canopee-sdk
 
 `tests/client.rs` starts a real `Node` in-process (bound to a scratch
 `$HOME`) and drives it purely through `CanopeeClient`, covering identity,
-put/get/list/export, and the network methods' error paths (e.g. publishing
-with no subscribed peers). It depends on
-[`canopee-node`](../canopee-node) as a dev-dependency only — the SDK itself
-never depends on the node crate at runtime.
+storage, the network methods' error paths, and — over the same socket —
+user records (pointer round-trip, profile/contact/home versioning) and the
+share/unshare flip. It depends on [`canopee-node`](../canopee-node) as a
+dev-dependency only — the SDK itself never depends on the node crate at
+runtime.

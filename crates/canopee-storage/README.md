@@ -117,18 +117,48 @@ Fetchers who only know `(owner, name)` derive the same `key` independently
 resolved record before trusting `record.manifest` — a record can arrive
 from an arbitrary peer over the DHT, not just its actual owner.
 
+### User-level data ("state is per-app, data is per-user")
+
+Besides blobs and app manifests, `ObjectType` also covers **user-level
+records** — the data that belongs to a *person* rather than a single app,
+stored in the shared user store so every app (and every device, after key
+import) sees the same profile/contacts/home index:
+
+- `Profile` — display name, X25519 DH public key, optional avatar object id,
+  `version`. Pointed to by the `(owner, "profile")` record.
+- `ContactList` — a signed snapshot of contacts (`name`, `peer_id`,
+  `dh_public_key`, `note`), `version`. Pointed to by `(owner, "contacts")`.
+- `HomeIndex` — the table of contents for the user's whole store: optional
+  profile/contacts object ids, plus `entries: Vec<HomeEntry>` where each
+  entry is a named object (`name`, `object`, `object_type`, `shared`, `app`)
+  with `version`. Pointed to by `(owner, "home")`.
+
+Records are the only *mutable* layer — `Object`s themselves are immutable,
+so "edit!" means publishing a new version and repointing the record. The
+reserved names (`RECORD_PROFILE`/`RECORD_CONTACTS`/`RECORD_HOME`) live in
+[`user.rs`](src/user.rs); apps publish their own pointers under
+`app:<name>` instead.
+
+`HomeEntry.shared` is the explicit "share this on the network" flag: a
+`false` entry is only ever served from the owner's store; `true` is set via
+`Runtime::share_object` / `set_home_entry_shared` and means the object is
+announced on the DHT and served to any peer. Nothing is shared by default.
+
 | Type | Purpose |
 |---|---|
 | `Object` | The full signed, content-addressed object |
 | `ObjectId` | `sha256` hex digest of the object's payload |
-| `ObjectType` | Tag on an object's payload: `Blob`, `AppManifest`, or `AppPointer` (reserved — pointers are DHT records, not `Object`s; see below) |
+| `ObjectType` | Tag on an object's payload: `Blob`, `AppManifest`, `AppPointer` (reserved), `Profile`, `ContactList`, `HomeIndex` |
 | `ObjectPayload` | Owner + metadata + object type + raw bytes (what actually gets hashed/signed) |
 | `ObjectInfo` | Lightweight listing view: id, owner, size, verified |
 | `ExportBundle` | `{ version, object }` — the portable unit for import/export |
 | `AppManifest` | Name + owner + entrypoint object id + `path -> object id` asset map for a published app |
 | `AppPointerRecord` | Signed, mutable `(owner, name) -> manifest id` pointer, published as a DHT record rather than an `Object` |
+| `Profile` / `ContactList` / `HomeIndex` | User-level records pointed to by reserved names (`user.rs`) |
+| `Contact` / `HomeEntry` | Contact-list entry / home-index entry shapes |
 | `Storage` | Filesystem-backed store: `put_verified`, `get_verified`, `list`, `list_objects`, `exists`, `import` |
 | `Verify` / `Export` | Traits implemented by `Object` for verification and bundling |
+| `Cache` / `CacheIndex` | Sidecar tracking cached (non-owned) objects + LRU last-served timestamps |
 
 ## On-disk layout
 
@@ -170,6 +200,17 @@ storage/
   mutable at a fixed key) and it isn't "owned" by local storage the way a
   fetched `Object` is. `ObjectType::AppPointer` exists as a reserved tag but
   nothing currently constructs an `Object` with it.
+- Concurrent writers in a **shared user store** are protected two ways:
+  (1) writes go through tmp-then-rename (an incomplete concurrent write
+  never leaves a torn file behind — object ids are content-addressed so
+  identical bytes always rename), and (2) `list`/`list_objects` skip
+  dot-files and tolerate undecodable entries rather than failing the whole
+  "my data" view for every other app.
+- The **user-level record types** (`Profile`, `ContactList`, `HomeIndex`)
+  are plain structs in [`user.rs`](src/user.rs) — they get their own
+  `ObjectType` variants (appended, never reordered, so existing bincode tags
+  stay stable) and their `to_object(identity)`/`decode` helpers, but they
+  behave like any other `Object` once encoded.
 
 ## Testing
 

@@ -42,6 +42,16 @@ Most commands are simple request → response:
 | `Announce { id }` | `Announced` | Announce on the DHT that this node holds an object |
 | `PublishAppPointer { name, manifest }` | `AppPointerPublished` | Sign (with this node's identity) and publish a mutable `(owner, name) -> manifest` pointer to the DHT, overwriting any previous pointer under the same name |
 | `ResolveAppPointer { owner, name }` | `AppPointer { record }` | Look up the latest pointer published by `owner` under `name`; `record` is `None` if not found. Caller must call `record.verify()` before trusting `record.manifest` |
+| `PublishPointer { name, target }` | `PointerPublished` | Generic user-record publish through the Runtime's cache-aware pointer layer (local record cache + best-effort DHT) |
+| `ResolvePointer { owner, name }` | `Pointer { record }` | Resolve a user record the Runtime way (local cache first, then bounded DHT) |
+| `SaveProfile { profile }` | `ProfileSaved { id }` | Store a new `Profile` version and repoint `(owner, "profile")` |
+| `LoadProfile` | `Profile { profile }` | Load the current `Profile` (local cache) |
+| `SaveContactList { list }` | `ContactListSaved { id }` | Store a new `ContactList` snapshot and repoint `(owner, "contacts")` |
+| `LoadContactList` | `ContactList { list }` | Load the current `ContactList` |
+| `SaveHomeIndex { index }` | `HomeIndexSaved { id }` | Store a new `HomeIndex` version and repoint `(owner, "home")` |
+| `LoadHomeIndex` | `HomeIndex { index }` | Load the current `HomeIndex` |
+| `SetHomeEntryShared { name, shared }` | `HomeIndexSaved { id }` | Flip a home entry's `shared` flag (the share/unshare action) |
+| `ShareObject { name, object, app }` | `HomeIndexSaved { id }` | Upsert a `shared: true` home entry for an object and announce it on the DHT |
 | any command | `Error { message }` | Any of the above can fail with this instead |
 
 `Subscribe { topic }` is the one exception — see below.
@@ -88,6 +98,16 @@ add latency and complexity for no benefit over just keeping the socket open.
   [`AppPointerRecord`](../canopee-storage) (signature included) since the
   caller — not the node — is responsible for verifying it before trusting
   `record.manifest`.
+- The same signing-in-the-node rule applies to the **user-record commands**
+  (`SaveProfile`/`SaveContactList`/`SaveHomeIndex`/`ShareObject`/
+  `PublishPointer`): clients pass the raw `Profile`/`ContactList`/`HomeIndex`
+  (or name + object id), and the node's Runtime bakes the version bump,
+  encodes it as a signed `Object`, and repoints the reserved record. This
+  keeps record authorship unspoofable without the SDK needing signing
+  primitives.
+- `ShareObject`/`SetHomeEntryShared` are how the **serving gate** is flipped
+  over the socket: they return the new `HomeIndex` object id so clients can
+  track the current index version in one round trip.
 
 ## Testing
 
