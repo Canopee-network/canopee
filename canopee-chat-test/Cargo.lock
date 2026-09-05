@@ -507,6 +507,7 @@ dependencies = [
  "canopee-identity",
  "canopee-network",
  "canopee-storage",
+ "futures",
  "hex",
  "serde",
  "time",

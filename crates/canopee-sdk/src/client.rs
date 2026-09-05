@@ -288,6 +288,47 @@ impl CanopeeClient {
         }
     }
 
+    /// Claims a globally unique username for the node's identity, so other
+    /// peers can discover and address this node by name (see
+    /// [`Self::resolve_username`]). Republishing under a new name re-claims it.
+    pub async fn claim_username(&self, username: impl Into<String>) -> anyhow::Result<()> {
+        match self
+            .request(NodeCommand::ClaimUsername {
+                username: username.into(),
+            })
+            .await?
+        {
+            NodeResponse::UsernameClaimed => Ok(()),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// The username currently claimed by the node's identity, if any.
+    pub async fn show_username(&self) -> anyhow::Result<Option<String>> {
+        match self.request(NodeCommand::ShowUsername).await? {
+            NodeResponse::Username { username } => Ok(username),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Reverse-resolves a friendly username to its canonical owner identity
+    /// via the DHT registry (spoof-verified against the owner's signed
+    /// record). Returns `None` if the name is unclaimed or unverified.
+    pub async fn resolve_username(
+        &self,
+        username: impl Into<String>,
+    ) -> anyhow::Result<Option<IdentityId>> {
+        match self
+            .request(NodeCommand::ResolveUsername {
+                username: username.into(),
+            })
+            .await?
+        {
+            NodeResponse::UsernameOwner { owner } => Ok(owner),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
     /// Stores a new `ContactList` snapshot and repoints the node's
     /// `(owner, "contacts")` record at it. Returns the new object id.
     pub async fn save_contact_list(&self, list: &ContactList) -> anyhow::Result<ObjectId> {

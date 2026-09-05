@@ -4,9 +4,12 @@
 //! Scenario:
 //!   1. Nodes A and B start and discover each other via mDNS (localhost).
 //!   2. A stores a file. It is private by default: B's fetch is refused.
-//!   3. A shares it (`canopee share`): B discovers A as a DHT provider and
-//!      fetches the object over the object-exchange protocol.
-//!   4. A unshares it (`canopee unshare`): B's fetch is refused again.
+//!   3. A claims the username `alice-e2e` (`canopee username claim`): B
+//!      reverse-resolves it to A's identity (`username lookup`) and sees it
+//!      in `canopee peers` instead of only A's raw peer id.
+//!   4. A shares the file (`canopee share`): B discovers A as a DHT provider
+//!      and fetches the object — by *username*, not raw peer id.
+//!   5. A unshares it (`canopee unshare`): B's fetch is refused again.
 //!
 //! Run with:
 //!   cargo test -p canopee-e2e -- --nocapture
@@ -215,6 +218,45 @@ fn two_nodes_share_and_unshare_end_to_end() {
             "fetching an unshared object must fail (stdout empty, stderr: {err})"
         );
 
+        // 3b. Username registry: A claims a globally unique username; B
+        //     reverse-resolves it through the DHT (registry record + verified
+        //     `(owner, "username")` pointer), and `canopee peers` displays
+        //     the name instead of only the raw peer id.
+        a.cli_ok(&["username", "claim", "alice-e2e"]);
+        let show = a.cli_ok(&["username", "show"]);
+        assert!(
+            show.trim() == "alice-e2e",
+            "A's claimed username must round-trip: {show}"
+        );
+        let identity_a = format!("canopee://identity/{peer_a}");
+        let deadline = Instant::now() + DHT_TIMEOUT;
+        let resolved = loop {
+            let (_, out, _) = b.cli(&["username", "lookup", "alice-e2e"]);
+            if out.contains(&identity_a) {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        };
+        assert!(
+            resolved,
+            "B never resolved username alice-e2e to {identity_a}"
+        );
+        let deadline = Instant::now() + DHT_TIMEOUT;
+        let named = loop {
+            let (_, out, _) = b.cli(&["peers"]);
+            if out.contains("alice-e2e") {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        };
+        assert!(named, "B's `canopee peers` never showed A's username");
+
         // 4. A shares the file under a name.
         a.cli_ok(&["share", "hello.txt", &object_id]);
 
@@ -232,7 +274,9 @@ fn two_nodes_share_and_unshare_end_to_end() {
         };
         assert!(found, "B never saw A as a provider of the shared object");
 
-        b.cli_ok(&["fetch", &peer_a, &object_id]);
+        // Fetch by username, not by raw peer id: the CLI reverse-resolves
+        // "alice-e2e" through the registry before fetching.
+        b.cli_ok(&["fetch", "alice-e2e", &object_id]);
         let list = b.cli_ok(&["list"]);
         assert!(
             list.contains(&object_id),

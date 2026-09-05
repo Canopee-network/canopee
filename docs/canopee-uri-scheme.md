@@ -41,6 +41,12 @@ to that short name in `~/.canopee/aliases`". This is the same tradeoff the
 rest of Canopee makes: the global namespace is `(owner, name)` where `owner`
 is a public key, and friendly strings are a convenience for *you*.
 
+> For *globally* unique friendly names — resolvable by any peer via the DHT,
+> not just your local aliases file — see
+> [`usernames.md`](usernames.md). A claimed username (`canopee username
+> claim alice`) can be aliased locally for URI use, but the alias itself
+> stays a per-machine convenience.
+
 ## Setup
 
 ### Register the scheme handler

@@ -13,6 +13,6 @@ pub use object_id::ObjectId;
 pub use pointer::AppPointerRecord;
 pub use storage::Storage;
 pub use user::{
-    Contact, ContactList, HomeEntry, HomeIndex, Profile, RECORD_CONTACTS, RECORD_HOME,
-    RECORD_PROFILE,
+    Contact, ContactList, HomeEntry, HomeIndex, Profile, UsernameRecord, RECORD_CONTACTS,
+    RECORD_HOME, RECORD_PROFILE, RECORD_USERNAME, USERNAME_REGISTRY_PREFIX,
 };

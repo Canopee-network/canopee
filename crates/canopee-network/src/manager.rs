@@ -1,7 +1,7 @@
 use crate::behaviour::{CanopeeBehaviour, CanopeeBehaviourEvent, IDENTIFY_PROTOCOL, KAD_PROTOCOL};
 use crate::message::{ObjectRequest, ObjectResponse, PubSubMessage};
 use crate::peer::{Peer, RelayReservation};
-use canopee_identity::Identity;
+use canopee_identity::{Identity, IdentityId};
 use canopee_storage::{ExportBundle, ObjectId};
 use futures::StreamExt;
 use libp2p::kad::{self, store::MemoryStore};
@@ -122,6 +122,15 @@ enum Command {
         reply: oneshot::Sender<anyhow::Result<ExportBundle>>,
     },
     ListPeers(oneshot::Sender<Vec<Peer>>),
+    /// Updates the tracked metadata (identity / username / display name) for
+    /// a connected peer, resolved out-of-band (e.g. from the peer's signed
+    /// profile and username records).
+    SetPeerMeta {
+        peer_id: PeerId,
+        identity: Option<IdentityId>,
+        username: Option<String>,
+        display_name: Option<String>,
+    },
     ListListenAddresses(oneshot::Sender<Vec<Multiaddr>>),
     ListRelayReservations(oneshot::Sender<Vec<RelayReservation>>),
     Subscribe(String, oneshot::Sender<anyhow::Result<()>>),
@@ -342,6 +351,27 @@ impl NetworkManager {
         Ok(rx.await?)
     }
 
+    /// Best-effort: enriches the tracked metadata for a connected peer (its
+    /// canonical identity, and any resolved username/display name). No-op if
+    /// the peer is no longer connected.
+    pub async fn set_peer_meta(
+        &self,
+        peer_id: PeerId,
+        identity: Option<IdentityId>,
+        username: Option<String>,
+        display_name: Option<String>,
+    ) -> anyhow::Result<()> {
+        self.commands
+            .send(Command::SetPeerMeta {
+                peer_id,
+                identity,
+                username,
+                display_name,
+            })
+            .await?;
+        Ok(())
+    }
+
     /// Returns the addresses this node is actually bound to (one per
     /// interface). Useful with an ephemeral listen port (e.g.
     /// `/ip4/127.0.0.1/tcp/0`) to learn the real port after startup.
@@ -447,7 +477,7 @@ async fn run_event_loop(
                     &mut pending_put_record,
                     &mut pending_get_record,
                     &mut pending_get_object,
-                    &peers,
+                    &mut peers,
                     &listen_addrs,
                     &relay_reservations,
                 );
@@ -469,7 +499,7 @@ fn handle_command(
         request_response::OutboundRequestId,
         oneshot::Sender<anyhow::Result<ExportBundle>>,
     >,
-    peers: &HashMap<PeerId, Peer>,
+    peers: &mut HashMap<PeerId, Peer>,
     listen_addrs: &Vec<Multiaddr>,
     relay_reservations: &HashMap<PeerId, RelayReservation>,
 ) {
@@ -538,6 +568,24 @@ fn handle_command(
         }
         Command::ListPeers(reply) => {
             let _ = reply.send(peers.values().cloned().collect());
+        }
+        Command::SetPeerMeta {
+            peer_id,
+            identity,
+            username,
+            display_name,
+        } => {
+            if let Some(peer) = peers.get_mut(&peer_id) {
+                if let Some(identity) = identity {
+                    peer.identity = Some(identity);
+                }
+                if let Some(username) = username {
+                    peer.username = Some(username);
+                }
+                if let Some(display_name) = display_name {
+                    peer.display_name = Some(display_name);
+                }
+            }
         }
         Command::ListRelayReservations(reply) => {
             let _ = reply.send(relay_reservations.values().cloned().collect());
@@ -621,7 +669,10 @@ async fn handle_swarm_event(
             if peer_id == *swarm.local_peer_id() {
                 return;
             }
-            peers.entry(peer_id).or_insert_with(|| Peer::new(peer_id));
+            let peer = peers
+                .entry(peer_id)
+                .or_insert_with(|| Peer::new(peer_id));
+            peer.identity = Some(IdentityId::new(format!("canopee://identity/{peer_id}")));
             swarm
                 .behaviour_mut()
                 .kad
@@ -656,6 +707,7 @@ async fn handle_swarm_event(
                     .add_address(&peer_id, addr.clone());
             }
             let peer = peers.entry(peer_id).or_insert_with(|| Peer::new(peer_id));
+            peer.identity = Some(IdentityId::new(format!("canopee://identity/{peer_id}")));
             peer.addresses = info.listen_addrs;
         }
         SwarmEvent::Behaviour(CanopeeBehaviourEvent::RelayClient(

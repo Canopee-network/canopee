@@ -16,6 +16,12 @@ pub struct PubSubMessage {
 pub struct PeerInfo {
     pub peer_id: String,
     pub identity: Option<IdentityId>,
+    /// The peer's claimed username, resolved opportunistically from its
+    /// signed `(owner, "username")` record (see `Peer.username`).
+    pub username: Option<String>,
+    /// The peer's profile display name, resolved from its signed
+    /// `(owner, "profile")` record.
+    pub display_name: Option<String>,
     pub addresses: Vec<String>,
 }
 
@@ -120,6 +126,15 @@ pub enum NodeCommand {
     /// Shares a stored object under `name`: upserts a `shared: true` home
     /// entry and announces the object as a DHT provider.
     ShareObject { name: String, object: ObjectId, app: Option<String> },
+    /// Claims a globally unique username for this node's identity (publishes
+    /// the signed `(owner, "username")` record + the DHT registry entry).
+    ClaimUsername { username: String },
+    /// Reverse-resolves a friendly username to its canonical owner via the
+    /// DHT registry (spoof-verified against the owner's signed record).
+    ResolveUsername { username: String },
+    /// Returns this identity's currently claimed username (its `(owner,
+    /// "username")` record), if any.
+    ShowUsername,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -191,5 +206,12 @@ pub enum NodeResponse {
     },
     HomeIndex {
         index: Option<HomeIndex>,
+    },
+    UsernameClaimed,
+    Username {
+        username: Option<String>,
+    },
+    UsernameOwner {
+        owner: Option<IdentityId>,
     },
 }

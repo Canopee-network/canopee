@@ -5,6 +5,13 @@ use libp2p::{Multiaddr, PeerId};
 pub struct Peer {
     pub peer_id: PeerId,
     pub identity: Option<IdentityId>,
+    /// The peer's claimed, globally unique username (from its `(owner,
+    /// "username")` record), resolved opportunistically when the peer is
+    /// connected and the node can reach the DHT/store.
+    pub username: Option<String>,
+    /// The peer's profile display name (from its `(owner, "profile")`
+    /// record), if one has been resolved.
+    pub display_name: Option<String>,
     pub addresses: Vec<Multiaddr>,
 }
 
@@ -13,6 +20,8 @@ impl Peer {
         Self {
             peer_id,
             identity: None,
+            username: None,
+            display_name: None,
             addresses: Vec::new(),
         }
     }

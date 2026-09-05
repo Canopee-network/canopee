@@ -4,14 +4,43 @@ use canopee_identity::{Identity, IdentityId};
 use canopee_network::{Multiaddr, NetworkManager, ObjectProvider, PeerId};
 use canopee_storage::{
     AppPointerRecord, Cache, CacheIndex, ContactList, Export, ExportBundle, HomeIndex, Object,
-    ObjectId, ObjectInfo, ObjectType, Profile, RECORD_CONTACTS, RECORD_HOME, RECORD_PROFILE,
-    Storage,
+    ObjectId, ObjectInfo, ObjectType, Profile, UsernameRecord, RECORD_CONTACTS, RECORD_HOME,
+    RECORD_PROFILE, RECORD_USERNAME, USERNAME_REGISTRY_PREFIX, Storage,
 };
 use state::NodeState;
 use std::path::PathBuf;
 use std::sync::Arc;
 use time::OffsetDateTime;
 use tokio::sync::RwLock;
+
+/// Normalizes a claimed username: trims whitespace and lowercases. Rejects
+/// empty or whitespace-only names.
+fn normalize_username(username: &str) -> anyhow::Result<String> {
+    let normalized = username.trim().to_lowercase();
+    if normalized.is_empty() {
+        anyhow::bail!("username must not be empty");
+    }
+    if normalized
+        .chars()
+        .any(|c| !(c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.'))
+    {
+        anyhow::bail!(
+            "username \"{username}\" contains invalid characters: only letters, digits, '_', '-', '.' allowed"
+        );
+    }
+    Ok(normalized)
+}
+
+/// Extracts the embedded libp2p `PeerId` from a canonical
+/// `canopee://identity/<peer-id>` identity string. `None` if the string
+/// isn't in that form or the peer id doesn't parse.
+fn owner_peer_id(owner: &IdentityId) -> Option<PeerId> {
+    owner
+        .to_string()
+        .strip_prefix("canopee://identity/")
+        .and_then(|rest| rest.split('/').next())
+        .and_then(|s| s.parse().ok())
+}
 
 pub struct Runtime {
     pub config: Config,
@@ -204,7 +233,40 @@ impl Runtime {
             runtime.reconcile_shared(None, Some(&index)).await;
         }
 
+        // Re-serve the public user records (profile, username) the user
+        // previously published, so peers can keep resolving them after a
+        // restart (the shared set and DHT provider records are per-session).
+        runtime.reshare_public_user_records().await;
+
         Ok(runtime)
+    }
+
+    /// Re-announces the objects the local `(owner, "profile")` and
+    /// `(owner, "username")` records point at, if any. Reads the local
+    /// record cache only (no DHT lookups) so startup stays fast; failures
+    /// are logged and skipped.
+    async fn reshare_public_user_records(&self) {
+        for name in [RECORD_PROFILE, RECORD_USERNAME] {
+            let key = AppPointerRecord::key(self.identity.id(), name);
+            let path = self
+                .config
+                .records_path()
+                .join(format!("{}.record", hex::encode(&key)));
+            let Ok(bytes) = tokio::fs::read(&path).await else {
+                continue;
+            };
+            let Ok(record) = bincode::deserialize::<AppPointerRecord>(&bytes) else {
+                continue;
+            };
+            if !record.verify() {
+                continue;
+            }
+            if self.storage.exists(&record.manifest).await {
+                if let Err(e) = self.announce(record.manifest.clone()).await {
+                    tracing::warn!("re-sharing {name} record failed: {e}");
+                }
+            }
+        }
     }
 
     pub async fn mark_started(&self) -> anyhow::Result<()> {
@@ -473,8 +535,203 @@ impl Runtime {
         let object = profile.to_object(&self.identity)?;
         let id = object.id.clone();
         self.storage.put_verified(&object).await?;
+        // A profile is a public self-description: serve + announce it so
+        // peers resolving `(owner, "profile")` (e.g. for friendly peer
+        // display names) can fetch it.
+        self.announce(id.clone()).await?;
         self.publish_pointer(RECORD_PROFILE, id.clone()).await?;
         Ok(id)
+    }
+
+    /// Claims a globally unique `username` for this identity: publishes the
+    /// signed `(owner, "username")` record in the shared store and announces
+    /// the `username:<name>` registry record on the DHT so others can
+    /// reverse-resolve the name back to this identity.
+    ///
+    /// Usernames are lowercased and trimmed, and must be non-empty.
+    pub async fn claim_username(&self, username: &str) -> anyhow::Result<()> {
+        let username = normalize_username(username)?;
+        let version = self
+            .resolve_username(self.identity.id())
+            .await?
+            .map(|u| u.version + 1)
+            .unwrap_or(1);
+        let record = UsernameRecord {
+            username: username.clone(),
+            version,
+        };
+        let object = record.to_object(&self.identity)?;
+        let id = object.id.clone();
+        self.storage.put_verified(&object).await?;
+        // A username claim is a public act by definition: serve the record
+        // object so any peer that resolves the pointer can fetch it, and
+        // announce ourselves as a DHT provider so `find_providers` finds us.
+        self.announce(id.clone()).await?;
+        self.publish_pointer(RECORD_USERNAME, id.clone()).await?;
+        // Registry record: `username:<name>` → owner. Best-effort DHT put
+        // (mirrors `publish_pointer`); a failure leaves the pointer readable
+        // by those who know the owner, just not reverse-resolvable by name.
+        let registry_key = format!("{USERNAME_REGISTRY_PREFIX}{username}").into_bytes();
+        let value = self.identity.id().to_string().into_bytes();
+        tokio::spawn({
+            let network = self.network.clone();
+            async move {
+                if let Err(e) =
+                    network.put_record(registry_key, value).await
+                {
+                    tracing::warn!("username registry put_record failed: {e}");
+                }
+            }
+        });
+        Ok(())
+    }
+
+    /// Resolves this identity's (or any owner's) claimed username from the
+    /// signed `(owner, "username")` record.
+    pub async fn resolve_username(
+        &self,
+        owner: &IdentityId,
+    ) -> anyhow::Result<Option<UsernameRecord>> {
+        let object = self.resolve_owner_object(owner, RECORD_USERNAME).await?;
+        let Some(object) = object else { return Ok(None) };
+        Ok(Some(object.decode()?))
+    }
+
+    /// Resolves `owner`'s signed `Profile` (display name, DH key, avatar)
+    /// via the `(owner, "profile")` record, fetching from the network when
+    /// it isn't cached locally.
+    pub async fn resolve_profile(
+        &self,
+        owner: &IdentityId,
+    ) -> anyhow::Result<Option<Profile>> {
+        let object = self.resolve_owner_object(owner, RECORD_PROFILE).await?;
+        let Some(object) = object else { return Ok(None) };
+        Ok(Some(object.decode()?))
+    }
+
+    /// Resolves the signed, verified object a peer publishes under
+    /// `(owner, name)` (e.g. `profile` or `username`), fetching it from the
+    /// network when it isn't cached locally. Returns `None` when there is no
+    /// record or the object doesn't verify against `owner`.
+    async fn resolve_owner_object(
+        &self,
+        owner: &IdentityId,
+        name: &str,
+    ) -> anyhow::Result<Option<Object>> {
+        let Some(record) = self.resolve_pointer(owner, name).await? else {
+            return Ok(None);
+        };
+        match self.storage.get_verified(&record.manifest).await {
+            Ok(object) if object.payload.owner == *owner => Ok(Some(object)),
+            Ok(_) => Ok(None),
+            Err(_) => {
+                // The pointer may point at an object we haven't cached; try
+                // to fetch it from the network so a *remote* profile/username
+                // is resolvable. Best-effort: an unreachable owner resolves
+                // to `None`. Hint the fetch at the owner's peer id (embedded
+                // in their identity string) so it works even when the owner
+                // never announced a DHT provider record.
+                let hint = owner_peer_id(owner);
+                match self.fetch_object(record.manifest.clone(), hint).await {
+                    Ok(object) if object.payload.owner == *owner => Ok(Some(object)),
+                    _ => Ok(None),
+                }
+            }
+        }
+    }
+
+    /// Best-effort enrichment of connected peers: for each connected peer,
+    /// resolve its signed username and profile display name from the network
+    /// and push them back into the network manager's peer map, so `peers()`
+    /// and the UI can show friendly names instead of raw peer ids.
+    ///
+    /// Resolution is opportunistic: peers whose records can't be reached
+    /// (offline DHT, not connected to bootstrap peers) simply keep `None` for
+    /// the unknown fields. All peers are resolved *concurrently*, each with
+    /// its own timeout, so one peer with no records (e.g. a bootstrap relay)
+    /// can't starve the others or discard their results.
+    pub async fn enrich_peers(&self) -> anyhow::Result<()> {
+        const ENRICH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+        let peers = self.network.peers().await?;
+        let resolutions = peers.into_iter().filter_map(|peer| {
+            let identity = peer.identity?;
+            // Per-peer timeout (not one shared deadline): a peer with no
+            // records (e.g. a bootstrap relay) times out on its own without
+            // discarding results already resolved for everyone else.
+            Some(async move {
+                // Each record gets its OWN timeout inside the join: a peer
+                // with a username but no profile must not lose its resolved
+                // username just because the profile DHT lookup is slow to
+                // return not-found.
+                let (username, display_name) = tokio::join!(
+                    async {
+                        tokio::time::timeout(ENRICH_TIMEOUT, self.resolve_username(&identity))
+                            .await
+                            .ok()
+                            .and_then(|r| r.ok())
+                            .flatten()
+                            .map(|u| u.username)
+                    },
+                    async {
+                        tokio::time::timeout(ENRICH_TIMEOUT, self.resolve_profile(&identity))
+                            .await
+                            .ok()
+                            .and_then(|r| r.ok())
+                            .flatten()
+                            .map(|p| p.display_name)
+                    }
+                );
+                (identity, username, display_name)
+            })
+        });
+        let results = futures::future::join_all(resolutions).await;
+        for (identity, username, display_name) in results {
+            if username.is_none() && display_name.is_none() {
+                continue;
+            }
+            if let Some(peer_id) = owner_peer_id(&identity) {
+                let _ = self
+                    .network
+                    .set_peer_meta(peer_id, Some(identity), username, display_name)
+                    .await;
+            }
+        }
+        Ok(())
+    }
+
+    /// Reverse-resolves a friendly `username` to its canonical owner
+    /// (`canopee://identity/<peer-id>`) via the DHT registry, then verifies
+    /// the claim by checking the returned owner really publishes a matching
+    /// `(owner, "username")` record. `None` if the name is unclaimed or the
+    /// registry record does not verify.
+    pub async fn resolve_owner_from_username(
+        &self,
+        username: &str,
+    ) -> anyhow::Result<Option<IdentityId>> {
+        let username = normalize_username(username)?;
+        let registry_key = format!("{USERNAME_REGISTRY_PREFIX}{username}").into_bytes();
+        let Some(bytes) = self
+            .network
+            .get_record(registry_key)
+            .await
+            .map_err(|e| anyhow::anyhow!("username lookup failed: {e}"))?
+        else {
+            return Ok(None);
+        };
+        let id_string = String::from_utf8(bytes)
+            .map_err(|_| anyhow::anyhow!("username registry record is not valid utf-8"))?;
+        let owner = IdentityId::new(id_string);
+        // Verify the claim: the owner must publish a (owner,"username")
+        // record that matches the requested name.
+        match self.resolve_username(&owner).await? {
+            Some(record) if record.username == username => Ok(Some(owner)),
+            Some(_) => {
+                tracing::warn!("username {username} claimed by an owner publishing a different name");
+                Ok(None)
+            }
+            None => Ok(None),
+        }
     }
 
     /// Loads the user's latest `ContactList` from the shared store, via the

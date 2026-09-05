@@ -22,11 +22,17 @@ canopee import <path>                     # import a .canopee bundle into local 
 
 canopee dial <multiaddr>                  # connect directly to a peer, e.g. /ip4/1.2.3.4/tcp/4001/p2p/<id>
 canopee listen-via-relay <relay-multiaddr> # request a relay circuit reservation (enables hole punching)
-canopee peers                             # list currently connected peers
+canopee peers                             # list connected peers by friendly name (profile display name / claimed
+                                          # username) when resolvable, falling back to a shortened peer id
 canopee relay-status                      # confirm accepted relay reservations + dialable circuit addresses
 canopee announce <object-id>              # announce on the DHT that this node provides an object
 canopee publish <topic> <message>         # publish a gossipsub message
-canopee chat <topic>                      # interactive send/receive REPL on a gossipsub topic
+canopee chat <topic>                      # interactive send/receive REPL on a gossipsub topic (senders shown by name)
+canopee fetch <peer|username> <object-id> # fetch an object from a peer — peer id, identity, or claimed username
+
+canopee username claim <name>             # claim a globally unique username (DHT registry + signed record)
+canopee username show                     # show this node's claimed username
+canopee username lookup <name>            # reverse-resolve a username to its owner identity (verified)
 
 canopee app-manifest <dir> <name>         # publish a directory (must contain index.html) as an app manifest;
                                            # announces the manifest + every asset and publishes a signed (owner, name) pointer
@@ -44,7 +50,7 @@ run `canopee start` (or `cargo run -p canopee-node` directly) first.
 |---|---|
 | `init` | Opens a `Runtime` directly (no node required) just to trigger identity/storage creation and print the identity |
 | `start` | Spawns `cargo run -p canopee-node` as a detached child process |
-| `stop`, `status`, `identity`, `put`, `get`, `list`, `export`, `import`, `dial`, `listen-via-relay`, `peers`, `relay-status`, `announce`, `publish` | Send one `NodeCommand` to the running node via `canopee_sdk::NodeClient` and print the `NodeResponse` |
+| `stop`, `status`, `identity`, `put`, `get`, `list`, `export`, `import`, `dial`, `listen-via-relay`, `peers`, `relay-status`, `announce`, `publish`, `username claim/show/lookup` | Send one `NodeCommand` to the running node via `canopee_sdk::NodeClient` and print the `NodeResponse` |
 | `chat` | Uses `canopee_sdk::CanopeeClient` to `subscribe` (printing incoming messages on a background task) and `publish` (from stdin) on the same topic — a small persistent REPL, not a one-shot request/response |
 | `app-manifest` | Walks a directory (via [`app::publish_directory`](src/app.rs)), stores every file as a `Blob` object plus one `AppManifest` object pointing at them, `announce`s the manifest and every asset, and `publish_app_pointer`s a signed `(owner, name)` pointer to the manifest |
 | `app-info` | Local `Get` + decode of a stored `AppManifest` object |
@@ -54,7 +60,9 @@ See [`docs/testing-chat-between-peers.md`](../../docs/testing-chat-between-peers
 for a full walkthrough of `chat`, `peers`, and `relay-status` together to
 test two nodes talking to each other, on a LAN or through a relay. See
 [`docs/app-manifests.md`](../../docs/app-manifests.md) for the full
-publish → announce → fetch → open lifecycle of `app-manifest`/`app-info`/`open`.
+publish → announce → fetch → open lifecycle of `app-manifest`/`app-info`/`open`,
+and [`docs/usernames.md`](../../docs/usernames.md) for how claimed usernames
+work and where they show up.
 
 ## Example session
 

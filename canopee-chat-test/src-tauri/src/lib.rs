@@ -63,6 +63,10 @@ struct MyDataInfo {
 struct NetworkPeer {
     peer_id: String,
     identity: Option<String>,
+    /// The peer's claimed username, if it published one.
+    username: Option<String>,
+    /// The peer's profile display name, if it published one.
+    display_name: Option<String>,
     addresses: Vec<String>,
 }
 
@@ -225,17 +229,45 @@ async fn send_message(state: State<'_, AppState>, args: SendArgs) -> Result<(), 
 }
 
 /// Manual peek at connected libp2p peers (e.g. to confirm mDNS discovery).
+/// Enriches them with their claimed username / profile display name first,
+/// so the UI can show friendly names instead of raw peer ids.
 #[tauri::command]
 async fn get_peers(state: State<'_, AppState>) -> Result<Vec<NetworkPeer>, String> {
+    let _ = state.runtime.enrich_peers().await;
     let peers = state.runtime.network.peers().await.map_err(|e| e.to_string())?;
     Ok(peers
         .into_iter()
         .map(|p| NetworkPeer {
             peer_id: p.peer_id.to_string(),
             identity: p.identity.map(|i| i.to_string()),
+            username: p.username,
+            display_name: p.display_name,
             addresses: p.addresses.into_iter().map(|a| a.to_string()).collect(),
         })
         .collect())
+}
+
+/// Claims a globally unique username for this identity, so contacts can
+/// discover and address the user by name instead of a raw peer id.
+#[tauri::command]
+async fn claim_username(state: State<'_, AppState>, username: String) -> Result<(), String> {
+    state
+        .runtime
+        .claim_username(&username)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// The username currently claimed by this identity, if any.
+#[tauri::command]
+async fn show_username(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    let identity = state.runtime.identity.id().clone();
+    state
+        .runtime
+        .resolve_username(&identity)
+        .await
+        .map(|record| record.map(|r| r.username))
+        .map_err(|e| e.to_string())
 }
 
 /// Directly dials a peer (same-LAN manual fallback; mDNS usually handles it).
@@ -472,6 +504,8 @@ pub fn run() {
             add_peer,
             send_message,
             get_peers,
+            claim_username,
+            show_username,
             dial,
             list_conversations,
             attach_picture,

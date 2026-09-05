@@ -291,21 +291,33 @@ impl Node {
                 message: "Subscribe must be handled as a streaming connection".to_string(),
             },
 
-            NodeCommand::Peers => match self.runtime.network.peers().await {
-                Ok(peers) => NodeResponse::Peers {
-                    peers: peers
-                        .into_iter()
-                        .map(|peer| canopee_protocol::PeerInfo {
-                            peer_id: peer.peer_id.to_string(),
-                            identity: peer.identity,
-                            addresses: peer.addresses.iter().map(|a| a.to_string()).collect(),
-                        })
-                        .collect(),
-                },
-                Err(e) => NodeResponse::Error {
-                    message: e.to_string(),
-                },
-            },
+            NodeCommand::Peers => {
+                // Best-effort enrichment: resolve connected peers' usernames
+                // and display names before answering, so the CLI/UI can show
+                // friendly names. Bounded internally (see `enrich_peers`).
+                let _ = self.runtime.enrich_peers().await;
+                match self.runtime.network.peers().await {
+                    Ok(peers) => NodeResponse::Peers {
+                        peers: peers
+                            .into_iter()
+                            .map(|peer| canopee_protocol::PeerInfo {
+                                peer_id: peer.peer_id.to_string(),
+                                identity: peer.identity,
+                                username: peer.username,
+                                display_name: peer.display_name,
+                                addresses: peer
+                                    .addresses
+                                    .iter()
+                                    .map(|a| a.to_string())
+                                    .collect(),
+                            })
+                            .collect(),
+                    },
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
 
             NodeCommand::RelayReservations => match self.runtime.network.relay_reservations().await
             {
@@ -481,6 +493,39 @@ impl Node {
             NodeCommand::ShareObject { name, object, app } => {
                 match self.runtime.share_object(&name, &object, app).await {
                     Ok(id) => NodeResponse::HomeIndexSaved { id },
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+
+            NodeCommand::ClaimUsername { username } => {
+                match self.runtime.claim_username(&username).await {
+                    Ok(()) => NodeResponse::UsernameClaimed,
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+
+            NodeCommand::ResolveUsername { username } => {
+                match self.runtime.resolve_owner_from_username(&username).await {
+                    Ok(owner) => NodeResponse::UsernameOwner { owner },
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+
+            NodeCommand::ShowUsername => {
+                match self
+                    .runtime
+                    .resolve_username(self.runtime.identity().id())
+                    .await
+                {
+                    Ok(record) => NodeResponse::Username {
+                        username: record.map(|r| r.username),
+                    },
                     Err(e) => NodeResponse::Error {
                         message: e.to_string(),
                     },

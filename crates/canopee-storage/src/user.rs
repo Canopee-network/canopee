@@ -19,6 +19,17 @@ use serde::{Deserialize, Serialize};
 pub const RECORD_PROFILE: &str = "profile";
 pub const RECORD_CONTACTS: &str = "contacts";
 pub const RECORD_HOME: &str = "home";
+/// The reserved record name under which a user publishes their globally
+/// claimed username: `(owner, "username")` → a signed `UsernameRecord`
+/// object. The username is unique network-wide (see the DHT registry key
+/// `USERNAME_REGISTRY_PREFIX` below) and lets other peers discover and
+/// address this identity by a friendly name instead of a raw peer id.
+pub const RECORD_USERNAME: &str = "username";
+/// DHT record key prefix for the global username registry: a mutable
+/// Kademlia record `username:<lowercased-name>` → the verified canonical
+/// owner (`canopee://identity/<peer-id>`), so anyone can reverse-resolve a
+/// username to its owning identity without knowing the peer id up front.
+pub const USERNAME_REGISTRY_PREFIX: &str = "username:";
 
 /// A user's public self-description. `dh_public_key` lets any app derive
 /// E2E conversation keys with the user without an extra lookup.
@@ -33,6 +44,28 @@ pub struct Profile {
 }
 
 impl Profile {
+    pub fn to_object(&self, identity: &Identity) -> anyhow::Result<Object> {
+        Ok(Object::new(
+            identity,
+            bincode::serialize(self)?,
+            ObjectType::Profile,
+        ))
+    }
+}
+
+/// A user's claimed, globally unique username. Published as a signed object
+/// under the `(owner, "username")` record; the same `username` is announced
+/// on the DHT (see `USERNAME_REGISTRY_PREFIX`) so others can resolve the
+/// name back to this identity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UsernameRecord {
+    pub username: String,
+    /// Incremented per claim; purely informational (the record timestamp is
+    /// the authoritative ordering).
+    pub version: u64,
+}
+
+impl UsernameRecord {
     pub fn to_object(&self, identity: &Identity) -> anyhow::Result<Object> {
         Ok(Object::new(
             identity,

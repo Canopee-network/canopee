@@ -56,6 +56,8 @@ enum Commands {
     },
     /// Fetches an object from a specific peer and imports it locally.
     Fetch {
+        /// The peer id, identity (`canopee://identity/...`), or username to
+        /// fetch from.
         peer_id: String,
         id: String,
     },
@@ -125,6 +127,28 @@ enum Commands {
     UriRegister,
     /// Removes the OS-level `canopee://` scheme registration.
     UriUnregister,
+    /// Claims and looks up globally unique usernames. A claimed username lets
+    /// other peers discover and address you by name instead of a raw peer id
+    /// (e.g. `canopee fetch <name> <id>`).
+    Username {
+        #[command(subcommand)]
+        command: UsernameCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum UsernameCommand {
+    /// Claims `<username>` for this node's identity so peers can discover it
+    /// by name.
+    Claim {
+        username: String,
+    },
+    /// Shows the username currently claimed by this node's identity.
+    Show,
+    /// Reverse-resolves `<username>` to its canonical owner identity.
+    Lookup {
+        username: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -348,26 +372,32 @@ async fn main() {
         }
 
         Commands::Peers => {
-            let client = NodeClient::new().await.unwrap();
-            let response = client.request(NodeCommand::Peers).await.unwrap();
-
-            match response {
-                NodeResponse::Peers { peers } => {
+            let client = CanopeeClient::connect().await.unwrap();
+            match client.peers().await {
+                Ok(peers) => {
                     if peers.is_empty() {
                         println!("No connected peers");
                     }
                     for peer in peers {
-                        println!("{}", peer.peer_id);
+                        let name = peer
+                            .display_name
+                            .clone()
+                            .or(peer.username.clone())
+                            .unwrap_or_else(|| short_peer_id(&peer.peer_id));
+                        println!("{name}");
+                        println!("  Peer ID: {}", peer.peer_id);
+                        if let Some(username) = &peer.username {
+                            println!("  Username: {username}");
+                        }
                         if let Some(identity) = &peer.identity {
-                            println!("  Identity: {:?}", identity);
+                            println!("  Identity: {identity}");
                         }
                         for addr in &peer.addresses {
-                            println!("  Address: {}", addr);
+                            println!("  Address: {addr}");
                         }
                     }
                 }
-                NodeResponse::Error { message } => eprintln!("Error: {}", message),
-                _ => {}
+                Err(e) => eprintln!("Error: {e}"),
             }
         }
 
@@ -456,14 +486,22 @@ async fn main() {
 
         Commands::Fetch { peer_id, id } => {
             let client = CanopeeClient::connect().await.unwrap();
-            match client.fetch_object(peer_id, ObjectId::new(&id)).await {
-                Ok(bundle) => {
-                    // Import so the object is stored (and re-served as cache).
-                    client.import(bundle).await.unwrap();
-                    println!("Fetched and imported {}", id);
+            match resolve_peer_arg(&client, &peer_id).await {
+                Ok(peer_id) => {
+                    match client.fetch_object(peer_id, ObjectId::new(&id)).await {
+                        Ok(bundle) => {
+                            // Import so the object is stored (and re-served as cache).
+                            client.import(bundle).await.unwrap();
+                            println!("Fetched and imported {}", id);
+                        }
+                        Err(e) => {
+                            eprintln!("Error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
                 }
                 Err(e) => {
-                    eprintln!("Error: {}", e);
+                    eprintln!("Error: {e}");
                     std::process::exit(1);
                 }
             }
@@ -519,13 +557,33 @@ async fn main() {
 
         Commands::Chat { topic } => {
             let client = CanopeeClient::connect().await.unwrap();
+            // Resolve connected peers' friendly names up front so incoming
+            // messages display as names rather than raw peer ids. Best-effort:
+            // unknown senders fall back to a shortened peer id.
+            let mut names: std::collections::HashMap<String, String> = client
+                .peers()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|p| {
+                    let name = p
+                        .display_name
+                        .clone()
+                        .or(p.username.clone())
+                        .unwrap_or_else(|| short_peer_id(&p.peer_id));
+                    (p.peer_id, name)
+                })
+                .collect();
             let mut subscription = client.subscribe(topic.clone()).await.unwrap();
 
             tokio::spawn(async move {
                 while let Ok(Some(message)) = subscription.next().await {
                     let text = String::from_utf8_lossy(&message.data);
                     let from = message.source.as_deref().unwrap_or("unknown");
-                    println!("{from}: {text}");
+                    let name = names
+                        .entry(from.to_string())
+                        .or_insert_with(|| short_peer_id(from));
+                    println!("{name}: {text}");
                 }
                 println!("Subscription closed");
             });
@@ -745,5 +803,81 @@ async fn main() {
                 std::process::exit(1);
             }
         },
+
+        Commands::Username { command } => {
+            let client = CanopeeClient::connect().await.unwrap();
+            match command {
+                UsernameCommand::Claim { username } => {
+                    match client.claim_username(&username).await {
+                        Ok(()) => println!("Claimed username \"{username}\""),
+                        Err(e) => {
+                            eprintln!("Error: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                UsernameCommand::Show => match client.show_username().await {
+                    Ok(Some(username)) => println!("{username}"),
+                    Ok(None) => {
+                        println!("No username claimed yet (claim one with `canopee username claim <name>`)")
+                    }
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    }
+                },
+                UsernameCommand::Lookup { username } => {
+                    match client.resolve_username(&username).await {
+                        Ok(Some(owner)) => println!("{username} -> {owner}"),
+                        Ok(None) => println!("No username \"{username}\" claimed"),
+                        Err(e) => {
+                            eprintln!("Error: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Shortens a raw libp2p peer id for display (`12D3KooW…abcd`) so terminal
+/// output isn't dominated by a 39-character base58 blob.
+fn short_peer_id(peer_id: &str) -> String {
+    const HEAD: usize = 12;
+    const TAIL: usize = 4;
+    if peer_id.len() <= HEAD + TAIL + 1 {
+        return peer_id.to_string();
+    }
+    format!("{}…{}", &peer_id[..HEAD], &peer_id[peer_id.len() - TAIL..])
+}
+
+/// Resolves a CLI peer argument to a dialable peer id string. Accepts:
+/// - a raw libp2p peer id (passed through),
+/// - a canonical identity `canopee://identity/<peer-id>` (peer id extracted),
+/// - a friendly username, reverse-resolved via the DHT registry.
+async fn resolve_peer_arg(client: &CanopeeClient, arg: &str) -> anyhow::Result<String> {
+    let arg = arg.trim();
+    // Canonical identity form: extract the embedded peer id.
+    if let Some(peer_id) = arg.strip_prefix("canopee://identity/") {
+        return Ok(peer_id.to_string());
+    }
+    // Raw peer id: libp2p Ed25519 peer ids always start with this prefix.
+    if arg.starts_with("12D3KooW") {
+        return Ok(arg.to_string());
+    }
+    // Otherwise treat it as a username and reverse-resolve it.
+    match client.resolve_username(arg).await? {
+        Some(owner) => {
+            let owner = owner.to_string();
+            owner
+                .strip_prefix("canopee://identity/")
+                .map(|s| s.to_string())
+                .ok_or_else(|| anyhow::anyhow!("malformed owner identity: {owner}"))
+        }
+        None => anyhow::bail!(
+            "\"{arg}\" is not a valid peer id, and no username \"{arg}\" is claimed \
+             (check with `canopee username lookup {arg}`)"
+        ),
     }
 }
