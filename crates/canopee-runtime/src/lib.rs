@@ -482,10 +482,13 @@ impl Runtime {
         Ok(imported.id().clone())
     }
 
-    pub async fn put(&self, data: Vec<u8>) -> anyhow::Result<ObjectId> {
+    pub async fn put(&self, data: Vec<u8>, name: Option<String>) -> anyhow::Result<ObjectId> {
         let object = Object::new(&self.identity, data, ObjectType::Blob);
         let id = object.id.clone();
         self.storage.put_verified(&object).await?;
+        if let Some(name) = name {
+            self.storage.set_name(&id, &name).await?;
+        }
 
         Ok(id)
     }
@@ -494,10 +497,14 @@ impl Runtime {
         &self,
         data: Vec<u8>,
         object_type: ObjectType,
+        name: Option<String>,
     ) -> anyhow::Result<Object> {
         let object = Object::new(&self.identity(), data, object_type);
 
         self.storage.put_verified(&object).await?;
+        if let Some(name) = name {
+            self.storage.set_name(&object.id, &name).await?;
+        }
 
         Ok(object)
     }
@@ -1243,8 +1250,16 @@ impl Runtime {
             .iter_mut()
             .find(|e| e.name == name)
             .ok_or_else(|| anyhow::anyhow!("no home entry named {name:?}"))?;
+        let object = entry.object.clone();
         entry.shared = shared;
-        self.save_home_index(&index).await
+        let index_id = self.save_home_index(&index).await?;
+        if shared {
+            // A freshly-shared entry must be findable by name from other
+            // machines: publish the `(owner, "entry:<name>")` pointer. Only
+            // sharing publishes it — private entries never leak into records.
+            self.publish_entry_pointer(name, &object).await;
+        }
+        Ok(index_id)
     }
 
     /// Shares a stored object under `name`: upserts a `shared: true` entry in
@@ -1280,7 +1295,21 @@ impl Runtime {
                 app,
             }),
         }
-        self.save_home_index(&index).await
+        let index_id = self.save_home_index(&index).await?;
+        // A share must be resolvable by name from other machines, so publish
+        // the `(owner, "entry:<name>")` pointer alongside the index.
+        self.publish_entry_pointer(name, id).await;
+        Ok(index_id)
+    }
+
+    /// Publishes the `(owner, "entry:<name>")` pointer record pointing at
+    /// `id`, so remote peers can resolve a shared entry by its human name.
+    /// Best-effort: the record is durably cached locally and fire-and-forget
+    /// on the DHT (see [`Self::publish_pointer`]).
+    async fn publish_entry_pointer(&self, name: &str, id: &ObjectId) {
+        if let Err(e) = self.publish_pointer(&format!("entry:{name}"), id.clone()).await {
+            tracing::warn!("publishing entry pointer {name:?} failed: {e}");
+        }
     }
 
     /// Diffs the `shared` flags between two home-index versions and applies
@@ -1911,7 +1940,7 @@ mod tests {
         let _ = with_scratch_home();
         let runtime = Runtime::open().await.unwrap();
 
-        let object = runtime.put_object(b"mine".to_vec(), ObjectType::Blob).await.unwrap();
+        let object = runtime.put_object(b"mine".to_vec(), ObjectType::Blob, None).await.unwrap();
         let id = object.id.clone();
 
         // Own objects are never added to the cache index, so they can never
@@ -1950,11 +1979,11 @@ mod tests {
         );
 
         let id_a = runtime_a
-            .put(b"from a".to_vec())
+            .put(b"from a".to_vec(), None)
             .await
             .expect("runtime a can store");
         let id_b = runtime_b
-            .put(b"from b".to_vec())
+            .put(b"from b".to_vec(), None)
             .await
             .expect("runtime b can store");
         assert_ne!(id_a, id_b);
@@ -2064,7 +2093,7 @@ mod tests {
         // A picture stored by app A is visible to app B through the shared
         // user store without any network round trip.
         let pic = runtime_a
-            .put_object(b"png-bytes".to_vec(), ObjectType::Blob)
+            .put_object(b"png-bytes".to_vec(), ObjectType::Blob, None)
             .await
             .unwrap();
         assert!(
@@ -2113,7 +2142,7 @@ mod tests {
         let _ = with_scratch_home();
         let runtime = Runtime::open().await.unwrap();
 
-        let mine = runtime.put_object(b"keep me".to_vec(), ObjectType::Blob).await.unwrap();
+        let mine = runtime.put_object(b"keep me".to_vec(), ObjectType::Blob, None).await.unwrap();
         assert!(runtime.cache.is_owned(&mine));
         // Owned objects are never *auto-marked* cached, so a plain eviction
         // path won't touch them (LRU only yields cached entries).
@@ -2141,7 +2170,7 @@ mod tests {
         let provider = provider_for(&runtime);
 
         let object = runtime
-            .put_object(b"private bytes".to_vec(), ObjectType::Blob)
+            .put_object(b"private bytes".to_vec(), ObjectType::Blob, None)
             .await
             .unwrap();
 
@@ -2237,7 +2266,7 @@ mod tests {
         let runtime = Runtime::open_with_root(base).await.unwrap();
 
         let blob = runtime
-            .put_object(b"pic".to_vec(), ObjectType::Blob)
+            .put_object(b"pic".to_vec(), ObjectType::Blob, None)
             .await
             .unwrap();
         let entry = canopee_storage::HomeEntry {
@@ -2288,7 +2317,7 @@ mod tests {
         assert!(runtime.set_home_entry_shared("pic.png", true).await.is_err());
 
         let blob = runtime
-            .put_object(b"pic".to_vec(), ObjectType::Blob)
+            .put_object(b"pic".to_vec(), ObjectType::Blob, None)
             .await
             .unwrap();
         let index = HomeIndex {
@@ -2339,7 +2368,7 @@ mod tests {
         );
 
         let blob = runtime
-            .put_object(b"share me".to_vec(), ObjectType::Blob)
+            .put_object(b"share me".to_vec(), ObjectType::Blob, None)
             .await
             .unwrap();
 
@@ -2359,7 +2388,7 @@ mod tests {
         // Re-sharing the same name updates the entry in place rather than
         // duplicating it.
         let blob2 = runtime
-            .put_object(b"new version".to_vec(), ObjectType::Blob)
+            .put_object(b"new version".to_vec(), ObjectType::Blob, None)
             .await
             .unwrap();
         runtime.share_object("file.txt", &blob2.id, None).await.unwrap();
@@ -2374,6 +2403,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sharing_publishes_a_resolvable_entry_pointer() {
+        let _guard = LOCK.lock().unwrap();
+        let base = std::env::temp_dir().join(format!(
+            "canopee_runtime_entry_pointer_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let runtime = Runtime::open_with_root(base).await.unwrap();
+
+        let blob = runtime
+            .put_object(b"pointer me".to_vec(), ObjectType::Blob, None)
+            .await
+            .unwrap();
+        let owner = runtime.identity().id().clone();
+
+        // Sharing under a name must make that name resolvable from the local
+        // record cache (the same machine is authoritative instantly — this is
+        // the path Bob's `canopee fetch alice <name>` uses).
+        runtime.share_object("summer-mix", &blob.id, None).await.unwrap();
+        let record = runtime
+            .resolve_pointer(&owner, "entry:summer-mix")
+            .await
+            .unwrap()
+            .expect("share must publish the (owner, \"entry:<name>\") pointer");
+        assert_eq!(record.manifest, blob.id);
+
+        // Unsharing must not have published a pointer for an entry that was
+        // never shared — private entries never surface as records.
+        let private = runtime
+            .put_object(b"private".to_vec(), ObjectType::Blob, None)
+            .await
+            .unwrap();
+        assert!(
+            runtime
+                .resolve_pointer(&owner, "entry:private")
+                .await
+                .unwrap()
+                .is_none(),
+            "unshared entries must not get pointer records"
+        );
+        let _ = private;
+    }
+
+    #[tokio::test]
     async fn shared_entries_survive_reopen() {
         let _guard = LOCK.lock().unwrap();
         let base = std::env::temp_dir().join(format!(
@@ -2385,7 +2458,7 @@ mod tests {
         let blob_id = {
             let runtime = Runtime::open_with_root(base.clone()).await.unwrap();
             let blob = runtime
-                .put_object(b"durable".to_vec(), ObjectType::Blob)
+                .put_object(b"durable".to_vec(), ObjectType::Blob, None)
                 .await
                 .unwrap();
             let index = HomeIndex {
@@ -2429,11 +2502,11 @@ mod tests {
         let peer_a = PeerId::from(runtime_a.identity.keypair().public());
 
         let public = runtime_a
-            .put_object(b"for the network".to_vec(), ObjectType::Blob)
+            .put_object(b"for the network".to_vec(), ObjectType::Blob, None)
             .await
             .unwrap();
         let private = runtime_a
-            .put_object(b"not for the network".to_vec(), ObjectType::Blob)
+            .put_object(b"not for the network".to_vec(), ObjectType::Blob, None)
             .await
             .unwrap();
 
@@ -2506,7 +2579,7 @@ mod tests {
             "B does not even have A's private object"
         );
         let b_private = runtime_b
-            .put_object(b"b's secret".to_vec(), ObjectType::Blob)
+            .put_object(b"b's secret".to_vec(), ObjectType::Blob, None)
             .await
             .unwrap();
         assert!(

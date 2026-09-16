@@ -27,7 +27,7 @@ async fn app_uses_identity_storage_and_network_via_sdk() {
     assert!(identity.to_string().starts_with("canopee://identity/"));
 
     // storage
-    let id = client.put(b"hello from an app".to_vec()).await.unwrap();
+    let id = client.put(b"hello from an app".to_vec(), None).await.unwrap();
     let object = client.get(id.clone()).await.unwrap();
     assert_eq!(object.payload.data, b"hello from an app");
 
@@ -104,7 +104,7 @@ async fn app_uses_identity_storage_and_network_via_sdk() {
 
     // Home index + the explicit share action.
     let pic = client
-        .put_object(b"png bytes".to_vec(), ObjectType::Blob)
+        .put_object(b"png bytes".to_vec(), ObjectType::Blob, None)
         .await
         .unwrap();
     let index = HomeIndex {

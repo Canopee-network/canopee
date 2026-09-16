@@ -303,7 +303,7 @@ async fn handle(
         }
 
         Put { text } => {
-            let id = client.put(text.into_bytes()).await?;
+            let id = client.put(text.into_bytes(), None).await?;
             Ok(serde_json::json!({ "id": id.0 }))
         }
 

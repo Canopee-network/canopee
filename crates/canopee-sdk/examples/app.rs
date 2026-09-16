@@ -20,7 +20,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Some("put") => {
             let text = args.get(1).expect("usage: put <text>");
-            let id = client.put(text.as_bytes().to_vec()).await?;
+            let id = client.put(text.as_bytes().to_vec(), None).await?;
             println!("{id}");
         }
         Some("get") => {

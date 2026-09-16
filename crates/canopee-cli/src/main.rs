@@ -16,6 +16,10 @@ use std::path::Path;
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+    /// Show content-addressed object ids (hidden by default — this CLI is
+    /// designed so storage, sharing and fetching work by human names alone).
+    #[arg(long, global = true)]
+    ids: bool,
 }
 
 #[derive(Subcommand)]
@@ -37,6 +41,17 @@ enum Commands {
     List,
     Start,
     Get {
+        /// The object's 64-char hex id, or a name you stored it under.
+        id: String,
+        /// Write the object's raw bytes to this file. Omit to print the
+        /// content to stdout (as UTF-8 text when possible).
+        #[arg(long)]
+        output: Option<String>,
+    },
+    /// Shows an object's metadata (owner, type, size, name) plus a preview
+    /// of its contents, so you can tell what a stored name actually is.
+    Desc {
+        /// The object's 64-char hex id, or a name you stored it under.
         id: String,
     },
     Put {
@@ -61,26 +76,34 @@ enum Commands {
     /// Announces on the DHT that this node provides the given object, so
     /// other peers can discover it via `find-providers`.
     Announce {
+        /// The object's 64-char hex id, or a name you stored it under.
         id: String,
     },
     /// Lists peer ids that have announced themselves as providers of the
     /// given object on the DHT.
     FindProviders {
+        /// The object's 64-char hex id, or a name you stored it under.
         id: String,
     },
-    /// Fetches an object from a specific peer and imports it locally.
+    /// Fetches an object from a specific peer and imports it locally. Pass a
+    /// raw id to fetch it directly, or a human name to resolve the peer's
+    /// shared entry by name (`canopee fetch <peer> <name>`).
     Fetch {
         /// The peer id, identity (`canopee://identity/...`), or username to
         /// fetch from.
         peer_id: String,
+        /// The object's 64-char hex id, or the name the peer shared it under.
         id: String,
     },
     /// Shares a stored object under a name: upserts a `shared: true` entry in
-    /// your home index and announces the object on the DHT, so any peer can
-    /// discover and fetch it.
+    /// your home index, publishes a `(owner, "entry:<name>")` pointer so other
+    /// peers can fetch it by name, and announces the object on the DHT.
     Share {
+        /// The name to share the object under (what others fetch it by).
         name: String,
-        id: String,
+        /// The object to share: a 64-char hex id, or a name you stored it
+        /// under. Omit to share the local object already named `<name>`.
+        id: Option<String>,
     },
     /// Stops sharing the home entry `<name>`: the object is withdrawn from
     /// the DHT and no longer served to peers.
@@ -104,11 +127,12 @@ enum Commands {
     AppInfo {
         id: String,
     },
-    /// Fetches an app manifest and its assets (from a peer if not stored
-    /// locally) and serves them over HTTP for viewing in a browser. Either
-    /// pass a manifest id directly, or `--owner`/`--name` to resolve the
-    /// latest manifest published under that name (so republishing doesn't
-    /// require sharing a new id).
+    /// Opens a stored object with the system's default app for it. Give a
+    /// file name you stored with `put` (or a raw id): the bytes are written
+    /// to a temp file and handed to your OS opener, so `.mp3`, `.jpg`, `.pdf`
+    /// etc. open in the right program. App manifests (<manifest-id>, or
+    /// `--owner`/`--name` to resolve by name) are fetched and served over
+    /// HTTP instead, as before.
     Open {
         id: Option<String>,
         #[arg(long)]
@@ -243,9 +267,9 @@ enum AliasCommand {
 
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
+    let Cli { command, ids } = Cli::parse();
 
-    match cli.command {
+    match command {
         Commands::Init => {
             let runtime = Runtime::open().await.unwrap();
             println!("Canopee initialized:");
@@ -367,14 +391,39 @@ async fn main() {
         }
 
         Commands::Put { path } => {
-            let data = tokio::fs::read(path).await.unwrap();
+            let data = tokio::fs::read(&path).await.unwrap();
+            let name = Path::new(&path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned());
             let client = NodeClient::new().await.unwrap();
-            let response = client.request(NodeCommand::Put { data }).await.unwrap();
+            let response = client
+                .request(NodeCommand::Put {
+                    data,
+                    name: name.clone(),
+                })
+                .await
+                .unwrap();
 
             match response {
                 NodeResponse::ObjectCreated { id } => {
-                    println!("Created object:");
-                    println!("{}", id);
+                    match name {
+                        Some(name) => {
+                            if ids {
+                                println!("Stored {name}");
+                                println!("Id: {id}");
+                            } else {
+                                println!("Stored {name}");
+                            }
+                        }
+                        None => {
+                            if ids {
+                                println!("Stored object");
+                                println!("Id: {id}");
+                            } else {
+                                println!("Stored object");
+                            }
+                        }
+                    }
                 }
 
                 NodeResponse::Error { message } => {
@@ -384,24 +433,95 @@ async fn main() {
             }
         }
 
-        Commands::Get { id } => {
-            let object_id = ObjectId::new(&id);
-            let client = NodeClient::new().await.unwrap();
-            let response = client
-                .request(NodeCommand::Get { id: object_id })
-                .await
-                .unwrap();
-
-            match response {
-                NodeResponse::Object { object } => {
-                    println!("Object:");
-                    println!("{:?}", object.id);
+        Commands::Get { id, output } => {
+            let client = CanopeeClient::connect().await.unwrap();
+            let (object_id, resolved_name) = match resolve_object_arg(&client, &id).await {
+                Ok(resolved) => resolved,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
                 }
-
-                NodeResponse::Error { message } => {
-                    eprintln!("Error: {}", message);
+            };
+            match client.get(object_id).await {
+                Ok(object) => {
+                    let name = object_name(&client, &object.id.0)
+                        .await
+                        .unwrap_or(resolved_name);
+                    match output {
+                        Some(path) => {
+                            tokio::fs::write(&path, &object.payload.data).await.unwrap();
+                            println!(
+                                "Wrote {} bytes to {path} ({name})",
+                                object.payload.data.len()
+                            );
+                        }
+                        None => {
+                            print!("{}", String::from_utf8_lossy(&object.payload.data));
+                            if !object.payload.data.is_empty()
+                                && !object.payload.data.ends_with(b"\n")
+                            {
+                                println!();
+                            }
+                        }
+                    }
                 }
-                _ => {}
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Commands::Desc { id } => {
+            let client = CanopeeClient::connect().await.unwrap();
+            let (object_id, resolved_name) = match resolve_object_arg(&client, &id).await {
+                Ok(resolved) => resolved,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            };
+            match client.get(object_id).await {
+                Ok(object) => {
+                    let data = &object.payload.data;
+                    let all_text = std::str::from_utf8(data).is_ok();
+                    let name = object_name(&client, &object.id.0)
+                        .await
+                        .unwrap_or(resolved_name);
+                    if ids {
+                        println!("Id: {}", object.id);
+                    }
+                    println!("Name: {name}");
+                    println!("Owner: {}", object.payload.owner);
+                    println!("Type: {:?}", object.payload.object_type);
+                    println!("Size: {} bytes", object.payload.metadata.size);
+                    if let Some(content_type) = &object.payload.metadata.content_type {
+                        println!("Content type: {content_type}");
+                    }
+                    println!("Created: {}", object.payload.metadata.created_at);
+                    println!();
+                    if all_text {
+                        println!("Preview:");
+                        let text = String::from_utf8_lossy(data);
+                        let preview: String = text.chars().take(200).collect();
+                        println!("{preview}");
+                        if text.chars().count() > 200 {
+                            println!("… (truncated)");
+                        }
+                    } else {
+                        println!("Preview: (binary, first bytes: {})", hex_preview(data));
+                        let printable: Vec<u8> = data
+                            .iter()
+                            .take(200)
+                            .map(|b| if b.is_ascii_graphic() || *b == b' ' { *b } else { b'.' })
+                            .collect();
+                        println!("{}", String::from_utf8_lossy(&printable));
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
             }
         }
 
@@ -412,8 +532,21 @@ async fn main() {
             match response {
                 NodeResponse::Objects { objects } => {
                     println!("Canopee Objects:\n");
+                    // User-facing objects are the named ones (`put` / `fetch`
+                    // name everything stored). Unnamed ones are mostly
+                    // internal records (home index, profile...) that only
+                    // clutter a file listing — they surface under `--ids`.
                     for object in objects {
-                        println!("{}", object.id);
+                        if object.name.is_none() && !ids {
+                            continue;
+                        }
+                        match &object.name {
+                            Some(name) => println!("{name}"),
+                            None => println!("(unnamed object)"),
+                        }
+                        if ids {
+                            println!("Id: {}", object.id);
+                        }
                         println!("Owner: {:?}", object.owner);
                         println!("Size: {} bytes", object.size);
                         println!(
@@ -560,39 +693,52 @@ async fn main() {
         }
 
         Commands::Announce { id } => {
-            let client = NodeClient::new().await.unwrap();
-            let object_id = ObjectId::new(&id);
-            let response = client
-                .request(NodeCommand::Announce { id: object_id })
-                .await
-                .unwrap();
-
-            match response {
-                NodeResponse::Announced => println!("Announced {}", id),
-                NodeResponse::Error { message } => eprintln!("Error: {}", message),
-                _ => {}
+            let client = CanopeeClient::connect().await.unwrap();
+            let (object_id, name) = match resolve_object_arg(&client, &id).await {
+                Ok(resolved) => resolved,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            };
+            match client.announce(object_id.clone()).await {
+                Ok(()) => {
+                    if ids {
+                        println!("Announced {name}");
+                        println!("Id: {object_id}");
+                    } else {
+                        println!("Announced {name}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
             }
         }
 
         Commands::FindProviders { id } => {
-            let object_id = ObjectId::new(&id);
-            let client = NodeClient::new().await.unwrap();
-            let response = client
-                .request(NodeCommand::FindProviders { id: object_id })
-                .await
-                .unwrap();
-
-            match response {
-                NodeResponse::Providers { peer_ids } => {
+            let client = CanopeeClient::connect().await.unwrap();
+            let (object_id, name) = match resolve_object_arg(&client, &id).await {
+                Ok(resolved) => resolved,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            };
+            match client.find_providers(object_id).await {
+                Ok(peer_ids) => {
                     if peer_ids.is_empty() {
-                        println!("No providers found for {id}");
+                        println!("No providers found for {name}");
                     }
                     for peer_id in peer_ids {
-                        println!("{}", peer_id);
+                        println!("{peer_id}");
                     }
                 }
-                NodeResponse::Error { message } => eprintln!("Error: {}", message),
-                _ => {}
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
             }
         }
 
@@ -615,38 +761,98 @@ async fn main() {
 
         Commands::Fetch { peer_id, id } => {
             let client = CanopeeClient::connect().await.unwrap();
-            match resolve_peer_arg(&client, &peer_id).await {
-                Ok(peer_id) => {
-                    match client.fetch_object(peer_id, ObjectId::new(&id)).await {
-                        Ok(bundle) => {
-                            // Import so the object is stored (and re-served as cache).
-                            client.import(bundle).await.unwrap();
-                            println!("Fetched and imported {}", id);
-                        }
-                        Err(e) => {
-                            eprintln!("Error: {}", e);
-                            std::process::exit(1);
+            if looks_like_id(&id) {
+                match resolve_peer_arg(&client, &peer_id).await {
+                    Ok(peer_id) => {
+match client.fetch_object(peer_id, ObjectId::new(&id)).await {
+                    Ok(bundle) => {
+                        // Import so the object is stored (and re-served as cache).
+                        import_idempotent(&client, bundle).await;
+                        if ids {
+                            println!("Fetched {id}");
+                        } else {
+                            println!("Fetched and imported object");
                         }
                     }
+                            Err(e) => {
+                                eprintln!("Error: {e}");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    }
                 }
-                Err(e) => {
-                    eprintln!("Error: {e}");
-                    std::process::exit(1);
+            } else {
+                // Name-based fetch: resolve the peer's shared entry by name via
+                // its `(owner, "entry:<name>")` pointer.
+                let (owner, device) = match resolve_owner_arg(&client, &peer_id).await {
+                    Ok(resolved) => resolved,
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                let record = match client.resolve_pointer(owner, format!("entry:{id}")).await {
+                    Ok(Some(record)) => record,
+                    Ok(None) => {
+                        eprintln!(
+                            "Error: \"{peer_id}\" has not shared anything named \"{id}\""
+                        );
+                        std::process::exit(1);
+                    }
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                let target = record.manifest.clone();
+                match client.fetch_object(device, target.clone()).await {
+                    Ok(bundle) => {
+                        // Import and name it, so the fetched object shows up in
+                        // `list` and can be `get`/`share`d by name. Import is
+                        // idempotent: fetching an object you already hold is
+                        // a no-op, not an error.
+                        import_idempotent(&client, bundle).await;
+                        client.set_name(target.clone(), id.clone()).await.unwrap();
+                        if ids {
+                            println!("Fetched \"{id}\" from {peer_id}");
+                            println!("Id: {target}");
+                        } else {
+                            println!("Fetched \"{id}\" from {peer_id}");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    }
                 }
             }
         }
 
         Commands::Share { name, id } => {
             let client = CanopeeClient::connect().await.unwrap();
-            match client
-                .share_object(name.clone(), ObjectId::new(&id), Some("cli".into()))
-                .await
-            {
-                Ok(_) => println!("Shared \"{}\" ({})", name, id),
+            // The object is the explicit `<id>` argument if given, otherwise
+            // the local object already recorded under the share name.
+            let object_arg = id.clone().unwrap_or_else(|| name.clone());
+            let (object_id, _) = match resolve_object_arg(&client, &object_arg).await {
+                Ok(resolved) => resolved,
                 Err(e) => {
-                    eprintln!("Error: {}", e);
+                    eprintln!("Error: {e}");
                     std::process::exit(1);
                 }
+            };
+            client
+                .share_object(name.clone(), object_id.clone(), Some("cli".into()))
+                .await
+                .unwrap();
+            if ids {
+                println!("Shared \"{name}\"");
+                println!("Id: {object_id}");
+            } else {
+                println!("Shared \"{name}\"");
             }
         }
 
@@ -669,14 +875,24 @@ async fn main() {
                         println!("Home index is empty");
                     }
                     for entry in index.entries {
-                        println!(
-                            "{}\n  Object: {}\n  Type: {:?}\n  Shared: {}\n  App: {}",
-                            entry.name,
-                            entry.object,
-                            entry.object_type,
-                            if entry.shared { "yes" } else { "no" },
-                            entry.app.as_deref().unwrap_or("-"),
-                        );
+                        if ids {
+                            println!(
+                                "{}\n  Object: {}\n  Type: {:?}\n  Shared: {}\n  App: {}",
+                                entry.name,
+                                entry.object,
+                                entry.object_type,
+                                if entry.shared { "yes" } else { "no" },
+                                entry.app.as_deref().unwrap_or("-"),
+                            );
+                        } else {
+                            println!(
+                                "{}\n  Type: {:?}\n  Shared: {}\n  App: {}",
+                                entry.name,
+                                entry.object_type,
+                                if entry.shared { "yes" } else { "no" },
+                                entry.app.as_deref().unwrap_or("-"),
+                            );
+                        }
                     }
                 }
                 Ok(None) => println!("No home index yet"),
@@ -755,7 +971,7 @@ async fn main() {
             };
             let bytes = bincode::serialize(&manifest).unwrap();
             let object_id = client
-                .put_object(bytes, ObjectType::AppManifest)
+                .put_object(bytes, ObjectType::AppManifest, Some(manifest.name.clone()))
                 .await
                 .unwrap();
 
@@ -812,26 +1028,47 @@ async fn main() {
         } => {
             let client = CanopeeClient::connect().await.unwrap();
 
-            let manifest_id = match (id, owner, name) {
-                (Some(id), _, _) => ObjectId::new(&id),
-                (None, Some(owner), Some(name)) => client
-                    .resolve_app_pointer(canopee_sdk::IdentityId::new(owner), name.clone())
-                    .await
-                    .unwrap()
-                    .unwrap_or_else(|| panic!("no app pointer found for \"{name}\"")),
-                _ => panic!("pass either <id> or both --owner and --name"),
-            };
-
-            let (manifest, files) = match fetch_app(&client, manifest_id, peer).await {
-                Ok(app) => app,
-                Err(e) => {
-                    eprintln!("Error: failed to open app: {e:#}");
+            match (id, owner, name) {
+                (Some(arg), _, _) => {
+                    let (object_id, display_name) = match resolve_object_arg(&client, &arg).await {
+                        Ok(resolved) => resolved,
+                        Err(e) => {
+                            eprintln!("Error: {e}");
+                            std::process::exit(1);
+                        }
+                    };
+                    // A locally-stored file opens with the OS default app;
+                    // anything else (a manifest, or a remote fetch) keeps the
+                    // app-serving behavior.
+                    match client.get(object_id.clone()).await {
+                        Ok(object) if object.payload.object_type != ObjectType::AppManifest => {
+                            open_with_default_app(&object.payload.data, &display_name).await;
+                        }
+                        _ => serve_app_on_http(&client, object_id, peer, port, open).await,
+                    }
+                }
+                (None, Some(owner), Some(name)) => {
+                    let manifest_id = match client
+                        .resolve_app_pointer(canopee_sdk::IdentityId::new(owner), name.clone())
+                        .await
+                    {
+                        Ok(Some(id)) => id,
+                        Ok(None) => {
+                            eprintln!("Error: no app pointer found for \"{name}\"");
+                            std::process::exit(1);
+                        }
+                        Err(e) => {
+                            eprintln!("Error: failed to resolve app pointer: {e:#}");
+                            std::process::exit(1);
+                        }
+                    };
+                    serve_app_on_http(&client, manifest_id, peer, port, open).await;
+                }
+                _ => {
+                    eprintln!("Error: pass either <id> or both --owner and --name");
                     std::process::exit(1);
                 }
-            };
-
-            println!("Opening \"{}\" by {}", manifest.name, manifest.owner);
-            serve(files, port, open).await.unwrap();
+            }
         }
 
         Commands::Handle { uri, port } => {
@@ -1143,6 +1380,139 @@ async fn main() {
     }
 }
 
+/// Imports a fetched bundle, treating "already stored" as success: fetching
+/// an object you already hold is a no-op, not an error. Any other failure
+/// exits so the fetch command never silently claims success.
+async fn import_idempotent(client: &CanopeeClient, bundle: ExportBundle) {
+    match client.import(bundle).await {
+        Ok(()) => {}
+        Err(e) if e.to_string().contains("already exists") => {}
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Writes a stored object's bytes to a temp file (keeping the name — and
+/// with it the file extension, so the OS picks the right handler) and opens
+/// it with the system's default app. The temp copy is left in place so the
+/// viewer can keep reading it; the path is printed for reference.
+async fn open_with_default_app(data: &[u8], name: &str) {
+    let dir = std::env::temp_dir().join("canopee-open");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("Error: cannot create temp dir {}: {e}", dir.display());
+        std::process::exit(1);
+    }
+    // Never let a stored name escape the temp dir.
+    let file_name = Path::new(name)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "object".to_string());
+    let path = dir.join(file_name);
+    if let Err(e) = tokio::fs::write(&path, data).await {
+        eprintln!("Error: cannot write {}: {e}", path.display());
+        std::process::exit(1);
+    }
+    println!("Opening {}", path.display());
+    #[cfg(target_os = "macos")]
+    {
+        match std::process::Command::new("open").arg(&path).spawn() {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("Error: could not launch `open`: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        eprintln!("Opening files with the system app is only wired up on macOS yet.");
+        eprintln!("The file is at: {}", path.display());
+    }
+}
+
+/// Fetches an app manifest (and its assets, from a peer or the DHT when not
+/// stored locally) and serves it over HTTP. The app half of `open`.
+async fn serve_app_on_http(
+    client: &CanopeeClient,
+    manifest_id: ObjectId,
+    peer: Option<String>,
+    port: u16,
+    open: bool,
+) {
+    let (manifest, files) = match fetch_app(client, manifest_id, peer).await {
+        Ok(app) => app,
+        Err(e) => {
+            eprintln!("Error: failed to open app: {e:#}");
+            std::process::exit(1);
+        }
+    };
+    println!("Opening \"{}\" by {}", manifest.name, manifest.owner);
+    serve(files, port, open).await.unwrap();
+}
+
+/// Resolves an object's recorded name from the local listing (names live in
+/// the storage sidecar, not inside the signed object).
+async fn object_name(client: &CanopeeClient, id: &str) -> Option<String> {
+    client
+        .list()
+        .await
+        .ok()?
+        .into_iter()
+        .find(|o| o.id.0 == id)
+        .and_then(|o| o.name)
+}
+
+/// True when `s` looks like a content-addressed object id: exactly 64 hex
+/// characters. Anything else is treated as a human name.
+fn looks_like_id(s: &str) -> bool {
+    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Resolves a CLI object argument to an id plus a display name. Accepts a
+/// 64-char hex id (passed through), or a human name known locally: either a
+/// storage sidecar name (from `put <file>`) or a home-index entry name (from
+/// `share`). Persistent ids are only meant for machine-to-machine use — this
+/// CLI is designed around names.
+async fn resolve_object_arg(
+    client: &CanopeeClient,
+    arg: &str,
+) -> anyhow::Result<(ObjectId, String)> {
+    if looks_like_id(arg) {
+        return Ok((ObjectId::new(arg), arg.to_string()));
+    }
+    let mut matches: Vec<ObjectId> = Vec::new();
+    for object in client.list().await? {
+        if object.name.as_deref() == Some(arg) {
+            matches.push(object.id);
+        }
+    }
+    // Only fall back to home-index entries when the sidecar listing found
+    // nothing. Resolving the home index can touch the DHT (unbounded
+    // round-trips when the `(owner, "home")` record isn't cached locally) —
+    // never make a name user already has on disk wait on the network.
+    if matches.is_empty() {
+        if let Some(index) = client.load_home_index().await? {
+            for entry in index.entries {
+                if entry.name == arg {
+                    matches.push(entry.object);
+                }
+            }
+        }
+    }
+    match matches.len() {
+        0 => anyhow::bail!(
+            "no local object named \"{arg}\" (put it first with `canopee put`, \
+             then try again — or pass the 64-char id)"
+        ),
+        1 => Ok((matches.pop().unwrap(), arg.to_string())),
+        n => anyhow::bail!(
+            "ambiguous: {n} local objects are named \"{arg}\" — pass the 64-char id to disambiguate"
+        ),
+    }
+}
+
 /// Shortens a raw libp2p peer id for display (`12D3KooW…abcd`) so terminal
 /// output isn't dominated by a 39-character base58 blob.
 fn short_peer_id(peer_id: &str) -> String {
@@ -1152,6 +1522,15 @@ fn short_peer_id(peer_id: &str) -> String {
         return peer_id.to_string();
     }
     format!("{}…{}", &peer_id[..HEAD], &peer_id[peer_id.len() - TAIL..])
+}
+
+/// Hex of the first few bytes of a binary blob, for previews ("68 65 6c").
+fn hex_preview(data: &[u8]) -> String {
+    data.iter()
+        .take(8)
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Resolves a CLI peer argument to a dialable peer id string. Accepts:
@@ -1166,10 +1545,23 @@ fn short_peer_id(peer_id: &str) -> String {
 /// registered device (e.g. pre-device-key peers), keeping the old dial path
 /// working for already-paired peers.
 async fn resolve_peer_arg(client: &CanopeeClient, arg: &str) -> anyhow::Result<String> {
+    Ok(resolve_owner_arg(client, arg).await?.1)
+}
+
+/// Like [`resolve_peer_arg`], but also returns the resolved owner identity —
+/// needed by name-based fetch, which resolves the owner's `(owner, "entry:
+/// <name>")` pointer before dialling one of their devices.
+async fn resolve_owner_arg(
+    client: &CanopeeClient,
+    arg: &str,
+) -> anyhow::Result<(canopee_sdk::IdentityId, String)> {
     let arg = arg.trim();
     // Raw peer id: libp2p Ed25519 peer ids always start with this prefix.
     if arg.starts_with("12D3KooW") {
-        return Ok(arg.to_string());
+        // The identity is unknown; derive the identity-scoped owner and dial
+        // the peer directly (legacy identity-bound path).
+        let owner = canopee_sdk::IdentityId::new(format!("canopee://identity/{arg}"));
+        return Ok((owner, arg.to_string()));
     }
     // Canonical identity form: the embedded peer id doubles as the owner.
     let owner = if let Some(peer_id) = arg.strip_prefix("canopee://identity/") {
@@ -1187,11 +1579,12 @@ async fn resolve_peer_arg(client: &CanopeeClient, arg: &str) -> anyhow::Result<S
     // Prefer the owner's registered device (device-key phase); fall back to
     // the identity-bound peer id for legacy peers that never registered.
     if let Some(device) = client.resolve_owner_device(&owner).await? {
-        return Ok(device);
+        return Ok((owner, device));
     }
-    owner
+    let peer_id = owner
         .to_string()
         .strip_prefix("canopee://identity/")
         .map(|s| s.to_string())
-        .ok_or_else(|| anyhow::anyhow!("cannot resolve \"{arg}\" to a dialable peer"))
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve \"{arg}\" to a dialable peer"))?;
+    Ok((owner, peer_id))
 }

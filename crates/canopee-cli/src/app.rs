@@ -53,8 +53,8 @@ pub async fn publish_directory(
         }
         let path = entry.path();
         let data = tokio::fs::read(path).await.unwrap();
-        let object_id = client.put_file(data.clone()).await?;
         let relative = path.strip_prefix(directory)?.to_string_lossy().to_string();
+        let object_id = client.put_file(&relative, data.clone()).await?;
 
         println!("{} -> {}", relative, object_id);
 

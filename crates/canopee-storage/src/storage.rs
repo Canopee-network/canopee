@@ -81,11 +81,13 @@ impl Storage {
                 continue;
             };
             let verified = object.verify();
+            let id = object.id.clone();
             let object_info = ObjectInfo {
-                id: object.id,
+                id: id.clone(),
                 owner: object.payload.owner,
                 size: object.payload.metadata.size,
                 verified,
+                name: self.read_name(&id).await,
             };
             objects.push(object_info);
         }
@@ -96,12 +98,43 @@ impl Storage {
         self.put_verified(object).await
     }
 
+    /// Records a human-friendly name for an object (e.g. the file name it was
+    /// stored from), stored *alongside* the object rather than inside its
+    /// signed payload. Keeping it out of the content-addressed object means
+    /// object ids and the on-disk format never change, old objects keep
+    /// listing, and re-putting identical bytes still yields the same id.
+    pub async fn set_name(&self, id: &ObjectId, name: &str) -> Result<()> {
+        let path = self.name_path(id);
+        fs::write(path, name.as_bytes()).await?;
+        Ok(())
+    }
+
+    /// Reads the recorded name for `id`, if any. Corrupt sidecars are treated
+    /// as absent rather than failing the listing.
+    pub async fn read_name(&self, id: &ObjectId) -> Option<String> {
+        let bytes = match fs::read(self.name_path(id)).await {
+            Ok(bytes) => bytes,
+            Err(_) => return None,
+        };
+        String::from_utf8(bytes).ok().filter(|s| !s.is_empty())
+    }
+
+    fn name_path(&self, id: &ObjectId) -> std::path::PathBuf {
+        std::path::Path::new(&self.root).join(format!(".{}.name", id.0))
+    }
+
     /// Removes a single object from storage by id. No-op if it doesn't exist.
     pub async fn delete(&self, id: &ObjectId) -> Result<()> {
         let path = format!("{}/{}", self.root, id.0);
         // Missing is not an error — eviction races with other writers.
         if fs::try_exists(&path).await.unwrap_or(false) {
             fs::remove_file(path).await?;
+        }
+        // Drop the name sidecar too, so an evicted object doesn't leave
+        // orphaned metadata behind.
+        let name = self.name_path(id);
+        if fs::try_exists(&name).await.unwrap_or(false) {
+            fs::remove_file(name).await?;
         }
         Ok(())
     }

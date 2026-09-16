@@ -87,9 +87,25 @@ impl CanopeeClient {
     // ---- storage ----
 
     /// Stores data locally as a signed object, owned by the node's identity.
-    pub async fn put(&self, data: Vec<u8>) -> anyhow::Result<ObjectId> {
-        match self.request(NodeCommand::Put { data }).await? {
+    pub async fn put(&self, data: Vec<u8>, name: Option<String>) -> anyhow::Result<ObjectId> {
+        match self.request(NodeCommand::Put { data, name }).await? {
             NodeResponse::ObjectCreated { id } => Ok(id),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Records a human-friendly name for a stored object, so it shows up in
+    /// listings and can be resolved id-free. The name lives *alongside* the
+    /// object (a sidecar file), never inside the signed bundle.
+    pub async fn set_name(&self, id: ObjectId, name: impl Into<String>) -> anyhow::Result<()> {
+        match self
+            .request(NodeCommand::SetName {
+                id,
+                name: name.into(),
+            })
+            .await?
+        {
+            NodeResponse::NameSet => Ok(()),
             other => Err(Self::unexpected(other)),
         }
     }
@@ -98,9 +114,14 @@ impl CanopeeClient {
         &self,
         data: Vec<u8>,
         object_type: ObjectType,
+        name: Option<String>,
     ) -> anyhow::Result<ObjectId> {
         match self
-            .request(NodeCommand::PutObject { data, object_type })
+            .request(NodeCommand::PutObject {
+                data,
+                object_type,
+                name,
+            })
             .await?
         {
             NodeResponse::ObjectCreated { id } => Ok(id),
@@ -108,12 +129,12 @@ impl CanopeeClient {
         }
     }
 
-    pub async fn put_file(&self, data: Vec<u8>) -> anyhow::Result<ObjectId> {
-        // let data = tokio::fs::read(path).await?;
+    pub async fn put_file(&self, name: &str, data: Vec<u8>) -> anyhow::Result<ObjectId> {
         let response = self
             .request(NodeCommand::PutObject {
                 data,
                 object_type: ObjectType::Blob,
+                name: Some(name.to_string()),
             })
             .await?;
         match response {

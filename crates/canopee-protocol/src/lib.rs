@@ -108,15 +108,24 @@ impl SyncResult {
 pub enum NodeCommand {
     Put {
         data: Vec<u8>,
+        name: Option<String>,
     },
     PutObject {
         data: Vec<u8>,
         object_type: ObjectType,
+        name: Option<String>,
     },
     Get {
         id: ObjectId,
     },
     List,
+    /// Gives a stored object a human-readable name (stored alongside the
+    /// object, never inside the signed bundle). Local convenience so listings
+    /// and resolution can stay id-free.
+    SetName {
+        id: ObjectId,
+        name: String,
+    },
     Export {
         id: ObjectId,
     },
@@ -271,6 +280,7 @@ pub enum NodeResponse {
     ObjectCreated {
         id: ObjectId,
     },
+    NameSet,
     Object {
         object: Object,
     },

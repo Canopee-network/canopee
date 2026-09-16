@@ -206,12 +206,21 @@ impl Node {
                 NodeResponse::Identity { identity_id }
             }
 
-            NodeCommand::Put { data } => match self.runtime.put(data).await {
+            NodeCommand::Put { data, name } => match self.runtime.put(data, name).await {
                 Ok(id) => NodeResponse::ObjectCreated { id },
                 Err(e) => NodeResponse::Error {
                     message: e.to_string(),
                 },
             },
+
+            NodeCommand::SetName { id, name } => {
+                match self.runtime.storage.set_name(&id, &name).await {
+                    Ok(()) => NodeResponse::NameSet,
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
 
             NodeCommand::Get { id } => match self.runtime.get(&id).await {
                 Ok(object) => NodeResponse::Object { object },
@@ -365,8 +374,15 @@ impl Node {
                     message: e.to_string(),
                 },
             },
-            NodeCommand::PutObject { data, object_type } => {
-                match self.runtime.put_object(data, object_type).await {
+            NodeCommand::PutObject {
+                data,
+                object_type,
+                name,
+            } => {
+                match self.runtime
+                    .put_object(data, object_type, name)
+                    .await
+                {
                     Ok(object) => NodeResponse::ObjectCreated { id: object.id },
                     Err(e) => NodeResponse::Error {
                         message: e.to_string(),
@@ -675,6 +691,7 @@ async fn test_node_put() {
     let response = node
         .handle(NodeCommand::Put {
             data: b"hello".to_vec(),
+            name: None,
         })
         .await;
 
@@ -734,7 +751,7 @@ mod eviction_tests {
         }
         let (old_id, _) = imported_object(&runtime, &vec![0u8; 64 * 1024]).await;
         let (new_id, _) = imported_object(&runtime, &vec![1u8; 64 * 1024]).await;
-        let owned = runtime.put_object(vec![2u8; 64 * 1024], ObjectType::Blob).await.unwrap();
+        let owned = runtime.put_object(vec![2u8; 64 * 1024], ObjectType::Blob, None).await.unwrap();
 
         assert!(runtime.cached_bytes().await > 0);
 
@@ -760,7 +777,7 @@ mod eviction_tests {
         unsafe {
             std::env::set_var("CANOPEE_CACHE_MAX_MB", "0");
         }
-        let owned = runtime.put_object(vec![3u8; 64 * 1024], ObjectType::Blob).await.unwrap();
+        let owned = runtime.put_object(vec![3u8; 64 * 1024], ObjectType::Blob, None).await.unwrap();
         assert_eq!(runtime.cached_bytes().await, 0);
 
         node.evict_if_over_cap(cache_cap_bytes()).await;

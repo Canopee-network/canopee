@@ -1,6 +1,6 @@
 # Chapter 2: The Object Model
 
-The object model is the heart of Canopee. Everything — profiles, contact lists, app manifests, file blobs, home indexes — is an object. Understanding objects is understanding Canopee.
+The object model is the heart of Canopee. Everything — profiles, contact lists, app manifests, file blobs, home indexes — is an object.
 
 ## Object Structure
 

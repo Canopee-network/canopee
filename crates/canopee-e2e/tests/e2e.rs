@@ -249,14 +249,16 @@ fn two_nodes_share_and_unshare_end_to_end() {
         );
         b.wait_for_peer(&device_a);
 
-        // 2. A stores a file; it is private by default.
+        // 2. A stores a file; it is private by default. The id is normally
+        //    hidden — ask for it explicitly with `--ids` (the default `put`
+        //    output is just `Stored <name>`).
         let file = base.join("hello.txt");
         std::fs::write(&file, b"hello over the p2p wire").unwrap();
-        let put_out = a.cli_ok(&["put", file.to_str().unwrap()]);
+        let put_out = a.cli_ok(&["put", file.to_str().unwrap(), "--ids"]);
         let object_id = put_out
             .lines()
             .find_map(|l| {
-                let t = l.trim();
+                let t = l.trim().strip_prefix("Id: ").unwrap_or(l.trim());
                 (t.len() == 64 && t.chars().all(|c| c.is_ascii_hexdigit())).then(|| t.to_string())
             })
             .unwrap_or_else(|| panic!("could not parse object id from: {put_out}"));
@@ -328,10 +330,33 @@ fn two_nodes_share_and_unshare_end_to_end() {
         // Fetch by username, not by raw peer id: the CLI reverse-resolves
         // "alice-e2e" through the registry before fetching.
         b.cli_ok(&["fetch", "alice-e2e", &object_id]);
-        let list = b.cli_ok(&["list"]);
+        let list = b.cli_ok(&["list", "--ids"]);
         assert!(
             list.contains(&object_id),
             "B must hold the object after fetching: {list}"
+        );
+
+        // 5b. Fetch by *name*, ids never needed: B resolves A's
+        //     `(owner, "entry:hello.txt")` pointer on the DHT and dials A's
+        //     device directly. Waiting until it resolves avoids racing the
+        //     fire-and-forget DHT publication from `share`.
+        let deadline = Instant::now() + DHT_TIMEOUT;
+        let name_fetched = loop {
+            let (ok, out, err) = b.cli(&["fetch", "alice-e2e", "hello.txt"]);
+            if ok && out.contains("Fetched \"hello.txt\"") {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                eprintln!("name-fetch stderr: {err}");
+                break false;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        };
+        assert!(name_fetched, "B never fetched hello.txt by name");
+        let list = b.cli_ok(&["list", "--ids"]);
+        assert!(
+            list.contains("hello.txt") && list.contains(&object_id),
+            "the name-fetched object must list by name (and id with --ids): {list}"
         );
 
         // 6. A's home index shows the shared entry.
