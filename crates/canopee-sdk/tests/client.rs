@@ -32,8 +32,10 @@ async fn app_uses_identity_storage_and_network_via_sdk() {
     assert_eq!(object.payload.data, b"hello from an app");
 
     let objects = client.list().await.unwrap();
-    assert_eq!(objects.len(), 1);
-    assert_eq!(objects[0].id, id);
+    assert!(
+        objects.iter().any(|o| o.id == id),
+        "the stored object must be listed (the node also stores its device record object)"
+    );
 
     let bundle = client.export(id.clone()).await.unwrap();
     assert_eq!(bundle.object.id, id);

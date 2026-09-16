@@ -1,7 +1,10 @@
 use crate::node_client::NodeClient;
 use crate::subscription::Subscription;
 use canopee_identity::IdentityId;
-use canopee_protocol::{NodeCommand, NodeResponse, PeerInfo, RelayReservationInfo};
+use canopee_protocol::{
+    DeviceInfo, NodeCommand, NodeResponse, PairingQrData, PeerInfo, RelayReservationInfo,
+    SyncResult,
+};
 use canopee_storage::{
     AppPointerRecord, ContactList, ExportBundle, HomeIndex, Object, ObjectId, ObjectInfo,
     ObjectType, Profile,
@@ -42,6 +45,41 @@ impl CanopeeClient {
     pub async fn identity(&self) -> anyhow::Result<IdentityId> {
         match self.request(NodeCommand::Identity).await? {
             NodeResponse::Identity { identity_id } => Ok(identity_id),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Exports the identity key as an encrypted, transferable envelope. The
+    /// same passphrase must be supplied again on [`Self::import_identity`].
+    pub async fn export_identity(&self, passphrase: String) -> anyhow::Result<Vec<u8>> {
+        match self
+            .request(NodeCommand::ExportIdentity { passphrase })
+            .await?
+        {
+            NodeResponse::IdentityExported { bytes } => Ok(bytes),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Imports an identity key previously exported via
+    /// [`Self::export_identity`]. The imported identity is written to disk;
+    /// the node must be restarted for it to take effect. `overwrite` must be
+    /// `true` to replace an existing identity (the old key is backed up).
+    pub async fn import_identity(
+        &self,
+        bytes: Vec<u8>,
+        passphrase: String,
+        overwrite: bool,
+    ) -> anyhow::Result<IdentityId> {
+        match self
+            .request(NodeCommand::ImportIdentity {
+                bytes,
+                passphrase,
+                overwrite,
+            })
+            .await?
+        {
+            NodeResponse::IdentityImported { identity_id } => Ok(identity_id),
             other => Err(Self::unexpected(other)),
         }
     }
@@ -311,6 +349,43 @@ impl CanopeeClient {
         }
     }
 
+    /// This machine's device `PeerId` (from its per-device key) and human
+    /// name.
+    pub async fn device(&self) -> anyhow::Result<(String, String)> {
+        match self.request(NodeCommand::Device).await? {
+            NodeResponse::Device {
+                peer_id,
+                device_name,
+            } => Ok((peer_id, device_name)),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// The devices currently carrying the node's identity, via the
+    /// `(owner, "devices")` record.
+    pub async fn device_list(&self) -> anyhow::Result<Vec<DeviceInfo>> {
+        match self.request(NodeCommand::DeviceList).await? {
+            NodeResponse::DeviceList { devices } => Ok(devices),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Resolves which device `PeerId` to dial to reach `owner`, via the
+    /// owner's `(owner, "devices")` list. `None` when the owner has no
+    /// registered device.
+    pub async fn resolve_owner_device(
+        &self,
+        owner: &IdentityId,
+    ) -> anyhow::Result<Option<String>> {
+        match self
+            .request(NodeCommand::ResolveOwnerDevice { owner: owner.clone() })
+            .await?
+        {
+            NodeResponse::OwnerDevice { peer_id } => Ok(peer_id),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
     /// Reverse-resolves a friendly username to its canonical owner identity
     /// via the DHT registry (spoof-verified against the owner's signed
     /// record). Returns `None` if the name is unclaimed or unverified.
@@ -325,6 +400,61 @@ impl CanopeeClient {
             .await?
         {
             NodeResponse::UsernameOwner { owner } => Ok(owner),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    // ---- LAN device pairing ----
+
+    /// Starts a pairing session on THIS device (the new device): mints a
+    /// fresh 12-char pairing code + one-time session id and returns the QR
+    /// data to display/print. The source device's user then reads the code
+    /// back as their explicit approval.
+    pub async fn pair_initiate(&self) -> anyhow::Result<PairingQrData> {
+        match self.request(NodeCommand::InitiatePairing).await? {
+            NodeResponse::PairingQr { qr } => Ok(qr),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// The counterpart to [`Self::pair_initiate`], run on the device already
+    /// carrying the identity: verifies the user-typed `code` against the QR
+    /// data, encrypts the identity + user records, and delivers them to the
+    /// new device over the LAN. Returns the new device's status message.
+    pub async fn pair_complete(
+        &self,
+        qr: PairingQrData,
+        code: String,
+    ) -> anyhow::Result<String> {
+        match self
+            .request(NodeCommand::CompletePairing { qr, code })
+            .await?
+        {
+            NodeResponse::PairingComplete { message } => Ok(message),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Refreshes this node's user records (profile, contacts, devices) from
+    /// the network, optionally dialing `peer_id` first. Last-writer-wins: a
+    /// newer signed pointer on the DHT replaces the local cache.
+    pub async fn sync_with_peer(&self, peer_id: impl Into<String>) -> anyhow::Result<SyncResult> {
+        match self
+            .request(NodeCommand::SyncFromPeer {
+                peer_id: peer_id.into(),
+            })
+            .await?
+        {
+            NodeResponse::SyncComplete { result } => Ok(result),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Refreshes this node's user records from every device in its
+    /// `(owner, "devices")` list.
+    pub async fn sync_with_all_devices(&self) -> anyhow::Result<SyncResult> {
+        match self.request(NodeCommand::SyncDeviceList).await? {
+            NodeResponse::SyncComplete { result } => Ok(result),
             other => Err(Self::unexpected(other)),
         }
     }

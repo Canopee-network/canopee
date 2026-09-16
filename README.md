@@ -11,6 +11,9 @@ node (through [`canopee-sdk`](crates/canopee-sdk)) to store data, discover
 and fetch objects from peers, and publish/subscribe to topics for real-time
 communication — without needing to run their own network stack.
 
+**New here?** Start with [`ONBOARDING.md`](ONBOARDING.md) — the practical
+guide to building, testing, and working in this repo.
+
 New to P2P networking or NAT/relays/DHTs? Start with
 [`docs/networking-for-beginners.md`](docs/networking-for-beginners.md) — a
 no-prior-knowledge walkthrough of the concepts and how to set up and connect
@@ -30,6 +33,9 @@ See [`docs/comparison.md`](docs/comparison.md).
   the difference between publishing static content via `app-manifest` and
   building a real program on [`canopee-sdk`](crates/canopee-sdk); read this
   if you're not sure which one you want.
+- [`docs/gateway-tutorial.md`](docs/gateway-tutorial.md) — driving a node
+  from a browser tab via `canopee gateway`, a loopback WebSocket bridge in
+  front of the node's Unix socket.
 - [`docs/tauri-presence-app-tutorial.md`](docs/tauri-presence-app-tutorial.md) —
   the smallest real `canopee-sdk` app: a desktop "who's online" presence
   indicator. Good starting point before the two below.
@@ -58,9 +64,10 @@ See [`docs/comparison.md`](docs/comparison.md).
   multiaddr.
 - [`docs/multi-device-identity.md`](docs/multi-device-identity.md) — a
   learn-by-doing guide to using the same identity from a laptop and a
-  phone: the honest manual key-copy version, an encrypted pairing-flow
-  version, and what a real (cross-signed, independently revocable)
-  multi-device design would need instead.
+  phone: the built-in `canopee pair` LAN flow (per-device keys, device
+  list, record sync), the encrypted export/import fallback, and — honestly —
+  what a real (cross-signed, independently revocable) device-key design
+  would still need instead.
 
 **Reference and roadmap docs** — not tutorials, but useful context:
 
@@ -107,6 +114,8 @@ this is the map of how they fit together.
      canopee-config     shared filesystem paths (~/.canopee/...)
      canopee-sdk        client library for apps — talks to the node over
                          its Unix socket using canopee-protocol
+     canopee-gateway    local WebSocket bridge so a browser tab can drive
+                         the node through canopee-sdk
 ```
 
 | Crate | What it is | README |
@@ -120,6 +129,7 @@ this is the map of how they fit together.
 | [`canopee-node`](crates/canopee-node) | The node daemon — binary + library, serves the Unix socket | [README](crates/canopee-node/README.md) |
 | [`canopee-sdk`](crates/canopee-sdk) | Client library for apps: identity, storage, network | [README](crates/canopee-sdk/README.md) |
 | [`canopee-cli`](crates/canopee-cli) | `canopee` command-line tool | [README](crates/canopee-cli/README.md) |
+| [`canopee-gateway`](crates/canopee-gateway) | Loopback WebSocket bridge: browser JS → `canopee-sdk` → node | [README](crates/canopee-gateway/README.md) |
 
 ## Quick start
 
@@ -155,7 +165,9 @@ Everything a node owns lives under `~/.canopee/` (see
 
 ```
 ~/.canopee/
-├── identity/identity.key   # Ed25519 keypair (create once, reused forever)
+├── identity/               # account key (the person) + device key (this machine)
+│   ├── identity.key        # Ed25519 account keypair (create once, reused across devices)
+│   └── device.key          # this machine's PeerId keypair (never shared)
 ├── storage/                # signed objects, one file per object id
 ├── exports/                # *.canopee export bundles
 ├── state/node.state        # small metadata: identity, started flag, timestamps

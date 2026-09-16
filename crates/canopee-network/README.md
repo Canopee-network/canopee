@@ -17,7 +17,7 @@ types directly.
 | `mdns` | Automatic discovery of peers on the local network (multicast DNS); auto-dials whatever it finds |
 | `object_exchange` (request-response, CBOR) | Direct object transfer: `ObjectRequest::GetObject(id)` → `ObjectResponse::Object(bundle)` \| `NotFound` |
 | `ping` | Liveness/RTT for established connections |
-| `gossipsub` | Topic-based pub/sub messaging, signed by each publisher's identity |
+| `gossipsub` | Topic-based pub/sub messaging, signed by each publisher's key |
 | `relay` (server) | Every node can relay traffic for a peer it can't otherwise reach — there's no dedicated relay infrastructure |
 | `relay_client` | Lets this node request a circuit reservation through another node acting as relay |
 | `dcutr` | Once relayed, attempts to upgrade the connection to a direct one (hole punching) |
@@ -33,9 +33,20 @@ operation goes through an `mpsc` command channel with `oneshot` (or
 
 ```rust
 use canopee_network::{NetworkManager, ObjectProvider};
+use libp2p::identity::Keypair;
 use std::sync::Arc;
 
-let network = NetworkManager::new(identity, "/ip4/0.0.0.0/tcp/0".parse()?, object_provider)?;
+// `device_key` is this machine's *device* keypair (Keypair), not the
+// account key — the swarm's PeerId is the device's, so several devices of
+// one identity can be online at once (see canopee-identity's "Account key
+// vs. device key"). `canopee-runtime` passes `device_key.keypair()`.
+let device_key: Keypair = /* per-device keypair, e.g. from DeviceKey */;
+let network = NetworkManager::new(
+    device_key,
+    "/ip4/0.0.0.0/tcp/0".parse()?,
+    object_provider,
+    mdns_enabled,
+)?;
 ```
 
 `object_provider: Arc<dyn ObjectProvider>` is how this crate stays decoupled

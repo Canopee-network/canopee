@@ -1,9 +1,13 @@
-use crate::behaviour::{CanopeeBehaviour, CanopeeBehaviourEvent, IDENTIFY_PROTOCOL, KAD_PROTOCOL};
-use crate::message::{ObjectRequest, ObjectResponse, PubSubMessage};
+use crate::behaviour::{
+    CanopeeBehaviour, CanopeeBehaviourEvent, IDENTIFY_PROTOCOL, KAD_PROTOCOL, PAIRING_PROTOCOL,
+};
+use crate::message::{
+    CanopeePairingRequest, CanopeePairingResponse, ObjectRequest, ObjectResponse, PubSubMessage,
+};
 use crate::peer::{Peer, RelayReservation};
-use canopee_identity::{Identity, IdentityId};
+use canopee_identity::IdentityId;
 use canopee_storage::{ExportBundle, ObjectId};
-use futures::StreamExt;
+use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use libp2p::kad::{self, store::MemoryStore};
 use libp2p::multiaddr::Protocol;
 use libp2p::request_response::{self, ProtocolSupport};
@@ -12,6 +16,7 @@ use libp2p::{
     Multiaddr, PeerId, StreamProtocol, SwarmBuilder, autonat, dcutr, gossipsub, identify, mdns,
     noise, ping, relay, tcp, yamux,
 };
+use libp2p::identity::Keypair;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -121,6 +126,13 @@ enum Command {
         object_id: ObjectId,
         reply: oneshot::Sender<anyhow::Result<ExportBundle>>,
     },
+    /// Sends a LAN pairing request to `peer_id` over `/canopee/pairing/1.0.0`
+    /// and awaits the response.
+    SendPairing {
+        peer_id: PeerId,
+        request: CanopeePairingRequest,
+        reply: oneshot::Sender<anyhow::Result<String>>,
+    },
     ListPeers(oneshot::Sender<Vec<Peer>>),
     /// Updates the tracked metadata (identity / username / display name) for
     /// a connected peer, resolved out-of-band (e.g. from the peer's signed
@@ -142,33 +154,50 @@ enum Command {
     },
 }
 
+/// An inbound LAN pairing request, forwarded to the runtime (which subscribes
+/// via [`NetworkManager::pairing_events`]) for decryption + import. The
+/// `reply` sender lets the runtime answer the other device; the manager holds
+/// the response channel until a reply arrives.
+#[derive(Debug, Clone)]
+pub struct InboundPairing {
+    pub peer: PeerId,
+    pub request: CanopeePairingRequest,
+    pub reply: mpsc::UnboundedSender<CanopeePairingResponse>,
+}
+
 #[derive(Clone)]
 pub struct NetworkManager {
     commands: mpsc::Sender<Command>,
     pubsub: broadcast::Sender<PubSubMessage>,
+    pairing_events: broadcast::Sender<InboundPairing>,
 }
 
 impl NetworkManager {
-    /// Builds a swarm for `identity`. `listen_addr` is where the swarm binds
-    /// (use `/ip4/0.0.0.0/tcp/0` for an OS-assigned port); `object_provider`
-    /// serves this node's stored objects to other peers.
+    /// Builds a swarm for `device_key` — the node's *device* keypair, whose
+    /// public key is the machine's network identity. The person identity key
+    /// is deliberately not used for networking: device keys let several
+    /// devices of one identity be online at once, each with its own `PeerId`
+    /// (see the `(owner, "devices")` record and the `device:<peer-id>`
+    /// registry in canopee-storage for the reverse mapping).
+    /// `listen_addr` is where the swarm binds (use `/ip4/0.0.0.0/tcp/0` for an
+    /// OS-assigned port); `object_provider` serves this node's stored objects
+    /// to other peers.
     ///
     /// `mdns` controls multicast discovery. Keep it on for a standalone node;
     /// embedded apps that share one identity with other apps should pass
     /// `false` so a second app's swarm never re-announces the same `PeerId`
     /// over mDNS (they still find each other via Kademlia/bootstrap + dialing).
     pub fn new(
-        identity: Arc<Identity>,
+        device_key: Keypair,
         listen_addr: Multiaddr,
         object_provider: Arc<dyn ObjectProvider>,
         mdns: bool,
     ) -> anyhow::Result<Self> {
-        // create peer_id from identity...
-        let keypair = identity.keypair();
-        let peer_id = PeerId::from(keypair.public());
+        // create peer_id from the device key...
+        let peer_id = PeerId::from(device_key.public());
 
         // build Swarm with relay client and behabviour
-        let mut swarm = SwarmBuilder::with_existing_identity(keypair)
+        let mut swarm = SwarmBuilder::with_existing_identity(device_key)
             .with_tokio()
             .with_tcp(
                 tcp::Config::default(),
@@ -200,6 +229,12 @@ impl NetworkManager {
                         request_response::Config::default(),
                     );
 
+                let pairing =
+                    request_response::cbor::Behaviour::<CanopeePairingRequest, CanopeePairingResponse>::new(
+                        [(StreamProtocol::new(PAIRING_PROTOCOL), ProtocolSupport::Full)],
+                        request_response::Config::default(),
+                    );
+
                 let ping = ping::Behaviour::new(ping::Config::default());
 
                 let mdns = if mdns {
@@ -227,6 +262,7 @@ impl NetworkManager {
                     identify,
                     kad,
                     object_exchange,
+                    pairing,
                     ping,
                     mdns,
                     gossipsub,
@@ -256,16 +292,19 @@ impl NetworkManager {
         // start listener loop and spawn processes...
         let (tx, rx) = mpsc::channel(64);
         let (pubsub_tx, _) = broadcast::channel(256);
+        let (pairing_tx, _) = broadcast::channel(64);
         tokio::spawn(run_event_loop(
             swarm,
             rx,
             object_provider,
             pubsub_tx.clone(),
+            pairing_tx.clone(),
         ));
 
         Ok(Self {
             commands: tx,
             pubsub: pubsub_tx,
+            pairing_events: pairing_tx,
         })
     }
 
@@ -304,6 +343,33 @@ impl NetworkManager {
     pub async fn unannounce(&self, object_id: ObjectId) -> anyhow::Result<()> {
         self.commands.send(Command::Unannounce(object_id)).await?;
         Ok(())
+    }
+
+    /// Returns a broadcast receiver for inbound LAN pairing requests. Exactly
+    /// one subscriber (the runtime's pairing handler) should consume these;
+    /// each `InboundPairing` carries an unbounded reply channel that must be
+    /// answered for the remote device's `send_pairing` call to return.
+    pub fn pairing_events(&self) -> broadcast::Receiver<InboundPairing> {
+        self.pairing_events.subscribe()
+    }
+
+    /// Sends a LAN pairing request to `peer_id` over `/canopee/pairing/1.0.0`
+    /// and awaits the remote's answer. Returns the remote's `Accepted` status
+    /// message, or an error on transport failure / refusal.
+    pub async fn send_pairing(
+        &self,
+        peer_id: PeerId,
+        request: CanopeePairingRequest,
+    ) -> anyhow::Result<String> {
+        let (reply, rx) = oneshot::channel();
+        self.commands
+            .send(Command::SendPairing {
+                peer_id,
+                request,
+                reply,
+            })
+            .await?;
+        rx.await?
     }
 
     /// Publishes an arbitrary, mutable DHT record under `key` (unlike
@@ -429,11 +495,17 @@ impl NetworkManager {
     }
 }
 
+type PairingReplyFuture = BoxFuture<'static, (
+    request_response::ResponseChannel<CanopeePairingResponse>,
+    CanopeePairingResponse,
+)>;
+
 async fn run_event_loop(
     mut swarm: libp2p::Swarm<CanopeeBehaviour>,
     mut commands: mpsc::Receiver<Command>,
     object_provider: Arc<dyn ObjectProvider>,
     pubsub: broadcast::Sender<PubSubMessage>,
+    pairing_events: broadcast::Sender<InboundPairing>,
 ) {
     let mut peers: HashMap<PeerId, Peer> = HashMap::new();
     let mut listen_addrs: Vec<Multiaddr> = Vec::new();
@@ -450,6 +522,12 @@ async fn run_event_loop(
         request_response::OutboundRequestId,
         oneshot::Sender<anyhow::Result<ExportBundle>>,
     > = HashMap::new();
+    let mut pending_pairing_request: HashMap<
+        request_response::OutboundRequestId,
+        oneshot::Sender<anyhow::Result<String>>,
+    > = HashMap::new();
+    let mut pairing_replies: FuturesUnordered<PairingReplyFuture> = FuturesUnordered::new();
+    let mut kad_bootstrapped = false;
 
     loop {
         tokio::select! {
@@ -464,8 +542,12 @@ async fn run_event_loop(
                     &mut pending_put_record,
                     &mut pending_get_record,
                     &mut pending_get_object,
+                    &mut pending_pairing_request,
                     &object_provider,
                     &pubsub,
+                    &pairing_events,
+                    &mut pairing_replies,
+                    &mut kad_bootstrapped,
                 ).await;
             }
             command = commands.recv() => {
@@ -477,10 +559,25 @@ async fn run_event_loop(
                     &mut pending_put_record,
                     &mut pending_get_record,
                     &mut pending_get_object,
+                    &mut pending_pairing_request,
                     &mut peers,
                     &listen_addrs,
                     &relay_reservations,
                 );
+            }
+            pairing_reply = async {
+                if pairing_replies.is_empty() {
+                    std::future::pending().await
+                } else {
+                    pairing_replies.next().await
+                }
+            } => {
+                if let Some((channel, response)) = pairing_reply {
+                    let _ = swarm
+                        .behaviour_mut()
+                        .pairing
+                        .send_response(channel, response);
+                }
             }
         }
     }
@@ -498,6 +595,10 @@ fn handle_command(
     pending_get_object: &mut HashMap<
         request_response::OutboundRequestId,
         oneshot::Sender<anyhow::Result<ExportBundle>>,
+    >,
+    pending_pairing_request: &mut HashMap<
+        request_response::OutboundRequestId,
+        oneshot::Sender<anyhow::Result<String>>,
     >,
     peers: &mut HashMap<PeerId, Peer>,
     listen_addrs: &Vec<Multiaddr>,
@@ -566,6 +667,17 @@ fn handle_command(
                 .send_request(&peer_id, ObjectRequest::GetObject(object_id));
             pending_get_object.insert(request_id, reply);
         }
+        Command::SendPairing {
+            peer_id,
+            request,
+            reply,
+        } => {
+            let request_id = swarm
+                .behaviour_mut()
+                .pairing
+                .send_request(&peer_id, request);
+            pending_pairing_request.insert(request_id, reply);
+        }
         Command::ListPeers(reply) => {
             let _ = reply.send(peers.values().cloned().collect());
         }
@@ -633,8 +745,15 @@ async fn handle_swarm_event(
         request_response::OutboundRequestId,
         oneshot::Sender<anyhow::Result<ExportBundle>>,
     >,
+    pending_pairing_request: &mut HashMap<
+        request_response::OutboundRequestId,
+        oneshot::Sender<anyhow::Result<String>>,
+    >,
     object_provider: &Arc<dyn ObjectProvider>,
     pubsub: &broadcast::Sender<PubSubMessage>,
+    pairing_events: &broadcast::Sender<InboundPairing>,
+    pairing_replies: &mut FuturesUnordered<PairingReplyFuture>,
+    kad_bootstrapped: &mut bool,
 ) {
     match event {
         SwarmEvent::NewListenAddr { address, .. } => {
@@ -669,14 +788,29 @@ async fn handle_swarm_event(
             if peer_id == *swarm.local_peer_id() {
                 return;
             }
-            let peer = peers
+            peers
                 .entry(peer_id)
                 .or_insert_with(|| Peer::new(peer_id));
-            peer.identity = Some(IdentityId::new(format!("canopee://identity/{peer_id}")));
             swarm
                 .behaviour_mut()
                 .kad
                 .add_address(&peer_id, endpoint.get_remote_address().clone());
+
+            // Once we've connected to a peer (in practice the bootstrap
+            // relay), kick off a Kademlia bootstrap query to populate the
+            // routing table. This turns the single dialed connection into
+            // full DHT discovery so the node can find arbitrary peers.
+            if !*kad_bootstrapped && endpoint.is_dialer() {
+                *kad_bootstrapped = true;
+                match swarm.behaviour_mut().kad.bootstrap() {
+                    Ok(_) => tracing::info!("Kademlia bootstrap started"),
+                    Err(e) => {
+                        // No known peers — shouldn't happen since we just
+                        // added one, but don't treat it as fatal.
+                        tracing::debug!("Kademlia bootstrap could not start: {e}");
+                    }
+                }
+            }
         }
         SwarmEvent::ConnectionClosed { peer_id, .. } => {
             peers.remove(&peer_id);
@@ -707,7 +841,6 @@ async fn handle_swarm_event(
                     .add_address(&peer_id, addr.clone());
             }
             let peer = peers.entry(peer_id).or_insert_with(|| Peer::new(peer_id));
-            peer.identity = Some(IdentityId::new(format!("canopee://identity/{peer_id}")));
             peer.addresses = info.listen_addrs;
         }
         SwarmEvent::Behaviour(CanopeeBehaviourEvent::RelayClient(
@@ -870,6 +1003,62 @@ async fn handle_swarm_event(
         )) => {
             if let Some(reply) = pending_get_object.remove(&request_id) {
                 let _ = reply.send(Err(anyhow::anyhow!("Request failed: {error}")));
+            }
+        }
+        SwarmEvent::Behaviour(CanopeeBehaviourEvent::Pairing(
+            request_response::Event::Message { peer, message, .. },
+        )) => match message {
+            request_response::Message::Request {
+                request, channel, ..
+            } => {
+                // Forward to the runtime's pairing handler, which decrypts the
+                // payload and decides whether to accept. The held response
+                // channel + reply `rx` are wrapped into a future polled by the
+                // select loop (busy-loop-safe via `is_empty()` guard) so once
+                // the handler answers we route the response over the wire.
+                let (reply_tx, mut reply_rx) = mpsc::unbounded_channel();
+                if pairing_events
+                    .send(InboundPairing {
+                        peer,
+                        request,
+                        reply: reply_tx,
+                    })
+                    .is_err()
+                {
+                    tracing::warn!("No pairing handler subscribed; ignoring inbound pairing");
+                }
+                pairing_replies.push(Box::pin(async move {
+                    let response = reply_rx.recv().await.unwrap_or(
+                        CanopeePairingResponse::Error("pairing handler unavailable".into()),
+                    );
+                    (channel, response)
+                }));
+                // A bounded sender means the request already timed out on the
+                // sender's side; the future above completes with an Error
+                // response that the behaviour drops, so nothing leaks.
+            }
+            request_response::Message::Response {
+                request_id,
+                response,
+            } => {
+                if let Some(reply) = pending_pairing_request.remove(&request_id) {
+                    let result = match response {
+                        CanopeePairingResponse::Accepted(message) => Ok(message),
+                        CanopeePairingResponse::Error(e) => {
+                            Err(anyhow::anyhow!("Pairing refused by remote: {e}"))
+                        }
+                    };
+                    let _ = reply.send(result);
+                }
+            }
+        },
+        SwarmEvent::Behaviour(CanopeeBehaviourEvent::Pairing(
+            request_response::Event::OutboundFailure {
+                request_id, error, ..
+            },
+        )) => {
+            if let Some(reply) = pending_pairing_request.remove(&request_id) {
+                let _ = reply.send(Err(anyhow::anyhow!("Pairing request failed: {error}")));
             }
         }
         _ => {}

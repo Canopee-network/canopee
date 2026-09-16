@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1"
 bincode = "1"
 hex = "0.4"
+hostname = "0.4"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 time = { version = "0.3", features = ["serde"] }
@@ -18,3 +19,4 @@ canopee-identity = { path = "../canopee-identity" }
 canopee-storage = { path = "../canopee-storage" }
 canopee-config = { path = "../canopee-config" }
 canopee-network = { path = "../canopee-network" }
+canopee-protocol = { path = "../canopee-protocol" }

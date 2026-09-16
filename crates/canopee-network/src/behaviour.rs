@@ -1,4 +1,4 @@
-use crate::message::{ObjectRequest, ObjectResponse};
+use crate::message::{CanopeePairingRequest, CanopeePairingResponse, ObjectRequest, ObjectResponse};
 use libp2p::{
     autonat, dcutr, gossipsub, identify, kad, mdns, ping, relay, request_response,
     swarm::behaviour::toggle::Toggle,
@@ -7,14 +7,19 @@ use libp2p::{
 
 pub const IDENTIFY_PROTOCOL: &str = "/canopee/id/1.0.0";
 pub const KAD_PROTOCOL: &[u8] = b"/canopee/kad/1.0.0";
+/// The LAN device-pairing request/response protocol (Phase 3).
+pub const PAIRING_PROTOCOL: &str = "/canopee/pairing/1.0.0";
 
 pub type ObjectExchange = request_response::cbor::Behaviour<ObjectRequest, ObjectResponse>;
+pub type PairingExchange =
+    request_response::cbor::Behaviour<CanopeePairingRequest, CanopeePairingResponse>;
 
 #[derive(NetworkBehaviour)]
 pub struct CanopeeBehaviour {
     pub identify: identify::Behaviour,
     pub kad: kad::Behaviour<kad::store::MemoryStore>,
     pub object_exchange: ObjectExchange,
+    pub pairing: PairingExchange,
     pub ping: ping::Behaviour,
     /// Disabled when a `NetworkManager` is created with `mdns: false` (the
     /// embedded-app default): a shared identity should never be *announced*

@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>canopee gateway demo</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; max-width: 46rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  h1 { font-size: 1.25rem; }
+  section { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #8884; }
+  label { display: block; margin-bottom: .25rem; font-size: .85rem; opacity: .8; }
+  input, textarea, button { font: inherit; padding: .4rem .5rem; border-radius: .4rem; border: 1px solid #8886; }
+  input, textarea { width: 100%; box-sizing: border-box; }
+  textarea { min-height: 4rem; resize: vertical; }
+  button { cursor: pointer; font-size: .85rem; }
+  .row { display: flex; gap: .5rem; align-items: center; }
+  .row input { flex: 1; }
+  #status { opacity: .7; font-size: .85rem; min-height: 1.2em; }
+  code { padding: .1em .35em; background: #8882; border-radius: .3rem; }
+  #chat { height: 12rem; overflow-y: auto; border: 1px solid #8884; border-radius: .4rem; padding: .5rem; margin-bottom: .5rem; white-space: pre-wrap; }
+  .entry { padding: .25rem 0; }
+  .entry .who { opacity: .6; }
+</style>
+</head>
+<body>
+<h1>&#127795; canopee gateway demo</h1>
+<p id="status">connecting&hellip;</p>
+
+<section>
+  <h2>identity</h2>
+  <p>I am <code id="identity">?</code></p>
+</section>
+
+<section>
+  <h2>storage</h2>
+  <p><textarea id="message" placeholder="write something about canopee&hellip;"></textarea></p>
+  <div class="row">
+    <input id="object-id" placeholder="object id (or paste one)">
+    <button id="put">put</button>
+    <button id="get">get</button>
+  </div>
+  <p class="entry"><span class="who">result &rarr;</span> <code id="storage-out"></code></p>
+</section>
+
+<section>
+  <h2>pub/sub chat</h2>
+  <div id="chat"></div>
+  <div class="row">
+    <input id="topic" value="gateway-demo" placeholder="topic">
+    <input id="say" placeholder="say something&hellip;">
+    <button id="send">send</button>
+  </div>
+</section>
+
+<script>
+const CANOPEE_TOKEN = "__CANOPEE_TOKEN__";
+window.CANOPEE_TOKEN = CANOPEE_TOKEN;
+</script>
+<script>
+__CLIENT_JS__
+</script>
+<script>
+const c = new CanopeeWeb("ws://" + location.host + "/?token=" + encodeURIComponent(CANOPEE_TOKEN));
+const status = document.getElementById("status");
+const chat = document.getElementById("chat");
+const topicEl = document.getElementById("topic");
+const reply = (text) => { document.getElementById("storage-out").textContent = text; };
+const addEntry = (who, text, topic) => {
+  const line = document.createElement("div");
+  line.className = "entry";
+  line.innerHTML = `<span class="who">[${escapeHtml(topic)}] ${escapeHtml(who)}</span> ${escapeHtml(text)}`;
+  chat.appendChild(line);
+  chat.scrollTop = chat.scrollHeight;
+};
+const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+
+(async () => {
+  try {
+    await c.connect();
+    const identity = await c.identity();
+    status.textContent = "connected to the canopee node via the gateway";
+    document.getElementById("identity").textContent = identity;
+
+    c.onError((e) => { status.textContent = "error: " + e.message; });
+    c.subscribe(topicEl.value, (m) => {
+      const who = m.source === identity ? "me" : (m.source || "unknown");
+      addEntry(who, m.text, m.topic);
+    });
+
+    document.getElementById("put").onclick = async () => {
+      try {
+        reply("putting&hellip;");
+        const id = await c.put(document.getElementById("message").value);
+        document.getElementById("object-id").value = id;
+        reply(id);
+      } catch (e) { reply("error: " + e.message); }
+    };
+    document.getElementById("get").onclick = async () => {
+      try {
+        reply("fetching&hellip;");
+        const o = await c.get(document.getElementById("object-id").value);
+        reply(o.text);
+      } catch (e) { reply("error: " + e.message); }
+    };
+    document.getElementById("send").onclick = async () => {
+      const text = document.getElementById("say").value.trim();
+      document.getElementById("say").value = "";
+      if (!text) return;
+      try {
+        await c.publish(topicEl.value, text);
+        addEntry("me", text, topicEl.value);
+      } catch (e) { status.textContent = "error: " + e.message; }
+    };
+  } catch (e) {
+    status.textContent = "connection failed: " + e.message;
+  }
+})();
+</script>
+</body>
+</html>

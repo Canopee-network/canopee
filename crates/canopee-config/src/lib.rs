@@ -15,6 +15,20 @@ use std::path::PathBuf;
 /// before). Embedded apps that want cross-app data sharing use
 /// `Config::new().with_app_root(app_dir)` — identity + storage stay at
 /// `~/.canopee`, everything app-specific goes under `app_dir`.
+///
+/// Instance isolation: `Config::new()` honors the `CANOPEE_APP_ROOT`
+/// environment variable, which replaces `dirs::home_dir()` as the base under
+/// which the `.canopee` app root lives. Both roots stay equal, so the node,
+/// the SDK client and the CLI all resolve the same socket/identity/storage —
+/// a scriptable equivalent of launching an instance with a custom `HOME` (used
+/// to run several isolated node+GUI instances side by side on one machine).
+///
+/// LAN simulation: set `CANOPEE_MDNS=0` to disable multicast discovery, so the
+/// instance only finds peers through the Kademlia DHT (bootstrap + dialing) —
+/// the same path two devices on *different* networks use. Combine with
+/// `CANOPEE_BOOTSTRAP_ADDRS` (`canopee-network`) to point the instance at a
+/// private bootstrap node instead of the public relay.
+#[derive(Clone)]
 pub struct Config {
     /// Per-app root (runtime state, socket, exports).
     root: PathBuf,
@@ -30,11 +44,22 @@ pub struct Config {
 
 impl Config {
     pub fn new() -> Self {
-        let home = dirs::home_dir().unwrap().join(".canopee");
+        let base = std::env::var_os("CANOPEE_APP_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| dirs::home_dir().unwrap());
+        let root = base.join(".canopee");
+        // `CANOPEE_MDNS=0` (also `false`, `no`, `off`) turns multicast
+        // discovery off (default on), so an instance only reaches peers over
+        // Kademlia/bootstrap + dialing — the path used between devices that
+        // are NOT on the same LAN.
+        let mdns_enabled = match std::env::var("CANOPEE_MDNS").ok() {
+            Some(v) => !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"),
+            None => true,
+        };
         Self {
-            root: home.clone(),
-            user_root: home,
-            mdns_enabled: true,
+            root: root.clone(),
+            user_root: root,
+            mdns_enabled,
         }
     }
 
@@ -102,6 +127,16 @@ impl Config {
     /// identity.
     pub fn identity_path(&self) -> PathBuf {
         self.user_root.join("identity")
+    }
+
+    /// The per-device key file, stored alongside the shared identity key. The
+    /// identity key (`identity_path()/identity.key`) is identical on every
+    /// device; this one is distinct on each, so the libp2p `PeerId` a device
+    /// announces and the signing identity it represents stay independent —
+    /// several devices can share one identity without colliding on the
+    /// network. Never leaves the device it was created on.
+    pub fn device_key_path(&self) -> PathBuf {
+        self.identity_path().join("device.key")
     }
 
     /// The user's object store (their `Object`s: files, pictures, contacts,
@@ -213,5 +248,94 @@ mod tests {
         assert_eq!(c.identity_path(), PathBuf::from("/tmp/user/identity"));
         assert_eq!(c.storage_path(), PathBuf::from("/tmp/user/storage"));
         assert_eq!(c.state_path(), PathBuf::from("/tmp/app/state/node.state"));
+    }
+
+    #[test]
+    fn device_key_sits_beside_the_identity_key_file() {
+        let c = Config::new();
+        assert_eq!(
+            c.device_key_path(),
+            c.identity_path().join("device.key"),
+            "device key lives next to identity.key, not inside it"
+        );
+        assert_ne!(c.device_key_path(), c.identity_path().join("identity.key"));
+    }
+
+    /// Runs in a child process (env overrides must never leak into the
+    /// parallel test harness): peers at the resolved paths of `Config::new()`
+    /// while `CANOPEE_APP_ROOT` is set. Skipped in the ordinary harness run —
+    /// only the parent `env_override_names_an_isolated_instance` re-invokes it
+    /// (via `--ignored --exact`) with the variable set.
+    #[test]
+    #[ignore]
+    fn assert_env_override_paths() {
+        let c = Config::new();
+        let root = PathBuf::from("/tmp/env-root/.canopee");
+        assert_eq!(c.home_dir(), root);
+        assert_eq!(c.user_root(), root);
+        assert_eq!(c.node_socket_path(), root.join("node.sock"));
+        assert_eq!(c.identity_path(), root.join("identity"));
+        assert_eq!(c.storage_path(), root.join("storage"));
+    }
+
+    #[test]
+    fn env_override_names_an_isolated_instance() {
+        let exe = std::env::current_exe().unwrap();
+        let out = std::process::Command::new(&exe)
+            .arg("--exact")
+            .arg("canopee_config::tests::assert_env_override_paths")
+            .arg("--ignored")
+            .arg("--nocapture")
+            .env("CANOPEE_APP_ROOT", "/tmp/env-root")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "child assertions failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Runs in a child process, like `assert_env_override_paths`: asserts
+    /// `CANOPEE_MDNS=0` turns multicast discovery off in `Config::new()`.
+    #[test]
+    #[ignore]
+    fn assert_env_mdns_override() {
+        assert!(!Config::new().mdns_enabled());
+    }
+
+    #[test]
+    fn env_mdns_toggle_names_an_isolated_instance() {
+        let exe = std::env::current_exe().unwrap();
+        for value in ["0", "false", "none"] {
+            let out = std::process::Command::new(&exe)
+                .arg("--exact")
+                .arg("canopee_config::tests::assert_env_mdns_override")
+                .arg("--ignored")
+                .arg("--nocapture")
+                .env("CANOPEE_MDNS", value)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "CANOPEE_MDNS={value} must disable mdns ({})",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        let out = std::process::Command::new(&exe)
+            .arg("--exact")
+            .arg("canopee_config::tests::assert_env_mdns_survives_by_default")
+            .arg("--ignored")
+            .arg("--nocapture")
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+    }
+
+    /// Runs in a child process: without `CANOPEE_MDNS`, mdns stays on.
+    #[test]
+    #[ignore]
+    fn assert_env_mdns_survives_by_default() {
+        assert!(Config::new().mdns_enabled());
     }
 }

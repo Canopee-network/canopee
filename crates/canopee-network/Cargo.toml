@@ -33,6 +33,7 @@ libp2p = { version = "0.54", features = [
 
 canopee-storage = { path = "../canopee-storage" }
 canopee-identity = { path = "../canopee-identity" }
+canopee-protocol = { path = "../canopee-protocol" }
 
 [dev-dependencies]
 async-trait = "0.1"

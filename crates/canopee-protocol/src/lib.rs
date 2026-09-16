@@ -32,6 +32,78 @@ pub struct RelayReservationInfo {
     pub listen_addrs: Vec<String>,
 }
 
+/// One device currently carrying an identity, as presented to the CLI/UI.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DeviceInfo {
+    pub device_id: String,
+    pub device_name: String,
+}
+
+/// Everything the *new* device publishes out of band (QR / printed) to start
+/// a pairing: its own device info, a dialable LAN address, the 12-char pairing
+/// code shown for the source device's user to type/scan, and a one-time
+/// `session_id` scoping the exchange.
+///
+/// The pairing code is deliberately the *full* 12-char value: the QR/printed
+/// form is the "out of band" channel that vouches for it. Over the peer-to-peer
+/// wire only `device_id` + `session_id` travel (see `CanopeePairingRequest`),
+/// so the code itself is never transmitted across the network.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PairingQrData {
+    pub version: u8,
+    pub device_id: String,
+    pub device_name: String,
+    /// Dialable multiaddr for this (new) device, e.g.
+    /// `/ip4/192.168.1.5/tcp/34567/p2p/12D3KooW…`.
+    pub lan_addr: String,
+    pub code: String,
+    pub session_id: String,
+}
+
+/// One signed record (object + its `(owner, name)` pointer) transferred during
+/// pairing, so the new device can store and verify it offline.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PairingRecord {
+    pub name: String,
+    pub object: Object,
+    pub pointer: AppPointerRecord,
+}
+
+/// The cleartext contents of a pairing payload: the identity signing key and
+/// a set of signed user records (device list, profile, contacts). Encrypted as
+/// a whole (bincode) under the session key before hitting the wire.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PairingData {
+    pub version: u8,
+    /// Raw Ed25519 identity keypair protobuf bytes (see `Identity::export_bytes`).
+    pub identity_key: Vec<u8>,
+    pub records: Vec<PairingRecord>,
+}
+
+/// The AEAD-encrypted pairing payload: `nonce || ciphertext || tag`, produced
+/// from `PairingData` by `Runtime::complete_pairing`.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PairingPayload {
+    pub encrypted: Vec<u8>,
+}
+
+/// The outcome of a sync pass: which user records were refreshed from the
+/// network (a newer signed pointer was found on the DHT and its object
+/// imported into local storage).
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SyncResult {
+    pub profile_updated: bool,
+    pub contacts_updated: bool,
+    pub devices_updated: bool,
+}
+
+impl SyncResult {
+    /// True when at least one record was refreshed.
+    pub fn any_updated(&self) -> bool {
+        self.profile_updated || self.contacts_updated || self.devices_updated
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum NodeCommand {
     Put {
@@ -132,9 +204,66 @@ pub enum NodeCommand {
     /// Reverse-resolves a friendly username to its canonical owner via the
     /// DHT registry (spoof-verified against the owner's signed record).
     ResolveUsername { username: String },
+    /// Returns the identity key as a transferable, encrypted envelope (see
+    /// `Identity::export_encrypted`) — the "move my identity to another
+    /// device" action. `passphrase` protects the exported bytes in transit.
+    ExportIdentity {
+        passphrase: String,
+    },
+    /// Imports an identity key previously exported via `ExportIdentity` and
+    /// persists it to the node's identity file. `overwrite` must be set to
+    /// replace an existing identity on disk (`false` refuses if one exists).
+    /// Only takes effect after the node restarts.
+    ImportIdentity {
+        bytes: Vec<u8>,
+        passphrase: String,
+        overwrite: bool,
+    },
     /// Returns this identity's currently claimed username (its `(owner,
     /// "username")` record), if any.
     ShowUsername,
+    /// Returns this device's network `PeerId` (from its per-device key) and
+    /// human-friendly name.
+    Device,
+    /// Lists the devices currently carrying this node's identity, via the
+    /// `(owner, "devices")` record.
+    DeviceList,
+    /// Resolves which device peer id to dial to reach `owner`, via its
+    /// `(owner, "devices")` list. `None` when the owner has no registered,
+    /// well-formed device.
+    ResolveOwnerDevice { owner: IdentityId },
+    /// Records another device against this node's `(owner, "devices")` list
+    /// and republishes it. Used by pairing/bonding to admit a new machine.
+    AddDevice {
+        device_id: String,
+        device_name: String,
+    },
+    /// Removes a device from this node's `(owner, "devices")` list and
+    /// republishes it.
+    RemoveDevice { device_id: String },
+    /// Starts a device-pairing session on THIS device (the new device): mints
+    /// a fresh 12-char code + session id and returns the `PairingQrData` to
+    /// show/print out of band. The node keeps the code in memory so it can
+    /// decrypt the payload the source device sends back.
+    InitiatePairing,
+    /// Completes a pairing initiated on another device: verifies the typed
+    /// code against the QR data, encrypts this device's identity + user
+    /// records, dials the other device on the LAN and delivers the payload.
+    /// Returns a human-readable status message on success.
+    CompletePairing {
+        qr: PairingQrData,
+        code: String,
+    },
+    /// Refreshes this node's user records (profile, contacts, devices) from
+    /// the network, optionally dialing `peer_id` first to ensure the peer is
+    /// reachable. Last-writer-wins: a newer signed pointer on the DHT
+    /// replaces the local cache and its object is imported.
+    SyncFromPeer { peer_id: String },
+    /// Refreshes this node's user records from every device in its
+    /// `(owner, "devices")` list. Equivalent to `SyncFromPeer` for each
+    /// registered device, but the record refresh itself is identity-scoped
+    /// (all devices share the same DHT keys), so it runs once.
+    SyncDeviceList,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -214,4 +343,42 @@ pub enum NodeResponse {
     UsernameOwner {
         owner: Option<IdentityId>,
     },
+    /// The encrypted envelope produced by `ExportIdentity` — raw bytes, ready
+    /// to be written to a file or handed to another device.
+    IdentityExported {
+        bytes: Vec<u8>,
+    },
+    /// Confirms an `ImportIdentity` succeeded and reports the identity the
+    /// node will adopt on restart.
+    IdentityImported {
+        identity_id: IdentityId,
+    },
+    /// The response to `Device`: this machine's network identity.
+    Device {
+        peer_id: String,
+        device_name: String,
+    },
+    /// The response to `DeviceList`.
+    DeviceList {
+        devices: Vec<DeviceInfo>,
+    },
+    /// The response to `ResolveOwnerDevice`: the peer id to dial, if the
+    /// owner has any registered device.
+    OwnerDevice {
+        peer_id: Option<String>,
+    },
+    DeviceAdded,
+    DeviceRemoved,
+    /// The response to `InitiatePairing`: the QR data to display/print.
+    PairingQr {
+        qr: PairingQrData,
+    },
+    /// Confirms a `CompletePairing` round-trip finished (payload accepted by
+    /// the other device, or a transport error surfaced in `Error`).
+    PairingComplete {
+        message: String,
+    },
+    /// The response to `SyncFromPeer` / `SyncDeviceList`: which records were
+    /// refreshed from the network.
+    SyncComplete { result: SyncResult },
 }

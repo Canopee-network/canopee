@@ -26,20 +26,25 @@ gives you one of them automatically.
 - `NetworkManager::peers()` (via `Runtime::network` or
   `canopee-sdk::CanopeeClient::peers()`) tells you who you're currently
   connected to, as libp2p `PeerId`s — this is real, live connection state.
-- But look at `Peer` in
-  [`crates/canopee-network/src/peer.rs`](../crates/canopee-network/src/peer.rs):
-  it has an `identity: Option<IdentityId>` field, and if you grep
-  `manager.rs` for where that field ever gets *set*, you won't find
-  anywhere — it's always `None` today. Nothing populates it.
+- And `Peer` in
+  [`crates/canopee-network/src/peer.rs`](../crates/canopee-network/src/peer.rs)
+  has an `identity: Option<IdentityId>` field that `canopee-network` fills
+  in for you — but only after you ask it to.
 
-This isn't a bug you need to fix, though — it's a shortcut you can take
-instead. `IdentityId` is *derived directly* from a `PeerId` (see
-`Identity::create`/`load` in
-[`crates/canopee-identity/src/identity.rs`](../crates/canopee-identity/src/identity.rs):
-`format!("canopee://identity/{}", peer_id)`). So you don't need
-`Peer::identity` to ever be populated — you can compute the identity
-string yourself from `peer.peer_id`, client-side, with simple string
-formatting. That's the whole trick this tutorial rests on.
+Here's the subtlety this tutorial rests on: a peer's libp2p `PeerId` is
+its **device** id (each device mints its own key; see
+[`multi-device-identity.md`](multi-device-identity.md)), while an
+`IdentityId` is the *account* that device carries —
+`canopee://identity/<account-key-peer-id>`. For a device paired onto an
+existing identity these are different strings, so you can **not** just
+format `peer.peer_id` into an identity string the way you'd have before
+device-key separation. Instead, the runtime gives you
+`Runtime::enrich_peers()`: it resolves each connected peer's identity
+through the `device:<peer-id> → identity` registry (falling back to the
+legacy identity-bound format only for pre-device-key peers), enriches the
+peer with the resolved username/display name too, and stores the result in
+the `Peer` structs. Call it in your polling loop before mapping peers, and
+read `peer.identity` from the result.
 
 ## Step 0: orient yourself in the existing code
 
@@ -52,8 +57,10 @@ Read these before changing anything:
   [`tauri-chat-app-tutorial.md`](tauri-chat-app-tutorial.md) uses for
   messages; here you're publishing small heartbeat pings instead of chat
   text.
-- `Identity::create`/`load`'s `canopee://identity/<peer-id>` format — the
-  string-derivation trick above.
+- `Runtime::enrich_peers()` in
+  [`crates/canopee-runtime/src/lib.rs`](../crates/canopee-runtime/src/lib.rs) —
+  the registry-backed peer→identity resolution you'll call before display,
+  instead of deriving the identity string from `peer_id` by hand.
 - If you haven't done
   [`tauri-chat-app-tutorial.md`](tauri-chat-app-tutorial.md)'s Steps 1–2
   yet (custom `Config` root, embedding a `Runtime` in a Tauri app's
@@ -61,9 +68,9 @@ Read these before changing anything:
   repeated. This tutorial picks up assuming you already have an embedded
   `Runtime` reachable from `#[tauri::command]` functions.
 
-**Checkpoint:** explain, in one sentence, why you don't need
-`Peer::identity` to ever be populated by `canopee-network` in order to
-show a contact's identity string in your UI.
+**Checkpoint:** explain, in one sentence, why `peer.peer_id` alone is no
+longer enough to show a contact's identity string, and what
+`enrich_peers()` gives you instead.
 
 ## Step 1: show directly-connected peers
 
@@ -72,10 +79,12 @@ identity string, with no heartbeat or contact list yet — the simplest
 possible "who's around."
 
 **Where:** one new `#[tauri::command]`, e.g. `list_connected_peers`, that
-calls `runtime.network.peers().await` and maps each `Peer` to a
-`format!("canopee://identity/{}", peer.peer_id)` string (matching
-`Identity`'s own formatting exactly, so what you display is consistent
-with what `canopee identity` prints elsewhere).
+calls `runtime.enrich_peers().await` first (Step 0's registry-backed
+resolution), then `runtime.network.peers().await` and maps each `Peer` to
+its `peer.identity` string — falling back to
+`format!("canopee://identity/{}", peer.peer_id)` only for legacy
+pre-device-key peers, exactly as `enrich_peers` itself does. Displaying
+`peer.identity` is consistent with what `canopee identity` prints.
 
 **Design question:** should this be a one-shot call your frontend polls
 periodically, or should you push updates to the frontend proactively
@@ -181,8 +190,9 @@ confirm the contact is still in your list and presence detection resumes
 
 ## Summary checklist
 
-- [ ] Step 0 — understood why `Peer::identity` doesn't need to be
-      populated, since `IdentityId` is derivable from `PeerId` directly
+- [ ] Step 0 — understood that a peer's libp2p `PeerId` is its device id,
+      not its identity, and used `enrich_peers()` to resolve
+      `Peer::identity`
 - [ ] Step 1 — a UI showing directly-connected peers by identity string,
       verified with two connected instances
 - [ ] Step 2 — per-contact gossipsub heartbeats giving accurate

@@ -24,6 +24,7 @@ the hosting-replacement roadmap:
 | App | Tutorial | What it exercises |
 |---|---|---|
 | Static site / SPA hosting | [`app-manifests.md`](app-manifests.md), [`spa-hosting-tutorial.md`](spa-hosting-tutorial.md) | `AppManifest`, `AppPointerRecord`, `announce`/`find_providers`, plain content serving |
+| Browser app driving the SDK from the tab | [`gateway-tutorial.md`](gateway-tutorial.md) | `canopee-gateway` WebSocket bridge, session-token + loopback-origin trust model, JSON `GatewayCommand`/`GatewayEvent` over WebSocket |
 | Availability beyond the original publisher | [`p2p-app-caching-tutorial.md`](p2p-app-caching-tutorial.md) | Re-announcing fetched objects, cache eviction |
 | Network bootstrapping | [`bootstrap-nodes-tutorial.md`](bootstrap-nodes-tutorial.md) | `dial`, `kad.add_address`/`bootstrap()`, first-contact discovery |
 | Desktop chat | [`tauri-chat-app-tutorial.md`](tauri-chat-app-tutorial.md) | Embedded `Runtime` in Tauri, gossipsub pub/sub, identity exchange, offline delivery via pointers |
@@ -59,27 +60,31 @@ needed" tutorial to write next if the goal is breadth over depth.
 
 ### Multi-device sync for one identity
 
-**Why it's different:** every existing tutorial assumes "one identity, one
-device." A file-sync tool (your own notes/files, kept consistent across
-your laptop and desktop) requires answering a question nothing in this
-repo currently documents: **how do two of your own machines safely share
-one identity's private key?** `Identity::create`/`load` in
-[`crates/canopee-identity`](../crates/canopee-identity/README.md) treats
-the key file as generated once, locally, and never mentions transferring
-it. A real tutorial here would need to work through: exporting/importing
-the raw key material securely (not just copying the file over an unencrypted
-channel), what happens if both devices are online and edit the same file
-at the same moment (the same convergence problem
+**Why it's different:** the identity-specific machinery now exists — pairing
+(`canopee pair`), per-device keys, the `(owner, "devices")` list, and
+user-record sync (`canopee sync`, see
+[`multi-device-identity.md`](multi-device-identity.md)) — but **content**
+sync does not. A file-sync tool (your own notes/files, kept consistent
+across your laptop and desktop) must answer a question nothing in this
+repo yet documents: **how do two of your own machines reconcile the
+objects each has, both online at once, without losing edits?** The shared
+store gives you the primitives — every object is content-addressed, signed,
+and fetchable from the other device via `find_providers`/`fetch_object` —
+but there's no built-in "replicate my whole store" command, and no conflict
+resolution. A real tutorial here would need to work through: exporting and
+importing records, what happens when both devices edit the same file at the
+same moment (the same convergence problem
 [`tauri-collab-editor-tutorial.md`](tauri-collab-editor-tutorial.md) solves
 with a CRDT — this is a legitimate reuse of that same technique for a
-different app shape), and using `export`/`import` plus `find_providers`/
-`fetch_object` for the actual sync mechanism.
+different app shape), and how much of the store a device should mirror
+versus fetch-on-demand.
 
-**Scoping note:** the "same key on two devices" security question is worth
-resolving explicitly and honestly (linking to
-[`security-considerations.md`](security-considerations.md)'s point about
-the key file having no encryption at rest today) before writing the
-step-by-step — this one has a real design prerequisite the others don't.
+**Scoping note:** the identity question is *solved* (pair to share the
+account key; each device keeps its own key), so the remaining hard part is
+pure data-layer convergence, not key distribution. Link to
+[`multi-device-identity.md`](multi-device-identity.md) for the identity
+half and scope the tutorial to additive replication + a deliberate
+conflict policy.
 
 ### A P2P bulletin board / public forum
 

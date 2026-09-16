@@ -124,15 +124,18 @@ persistence (e.g. remembering known peers across restarts).
 | Field | Purpose |
 |---|---|
 | `config` | The resolved `~/.canopee` paths ([`canopee-config`](../canopee-config)) |
-| `identity` | `Arc<Identity>` — shared with the network layer, which needs the same keypair |
+| `identity` | `Arc<Identity>` — the shared *account* key; signs shared objects and user records |
+| `device_key` | `Arc<DeviceKey>` — this machine's keypair; its public key is the network `PeerId` |
 | `storage` | `Arc<Storage>` — shared with `StorageObjectProvider` |
 | `network` | `NetworkManager` handle — public, so callers can drive the swarm directly |
 
 ## Design notes
 
-- `identity` and `storage` are `Arc`-wrapped specifically so
-  `NetworkManager::new` and `StorageObjectProvider` can each hold their own
-  reference without `Runtime` needing unsafe aliasing or a lock.
+- `identity` and `storage` are `Arc`-wrapped so shared references can be
+  handed around without `Runtime` needing unsafe aliasing or a lock:
+  `storage` is passed to `StorageObjectProvider`, and the *device*
+  keypair (`device_key.keypair()` — not the account key) is what
+  `NetworkManager::new` builds the swarm with.
 - `Runtime` has no shutdown/stop method of its own beyond `mark_stopped` —
   process lifecycle (accepting connections, handling `Shutdown`, exiting)
   is owned by [`canopee-node`](../canopee-node), which holds the `Runtime`

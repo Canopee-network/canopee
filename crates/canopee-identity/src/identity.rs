@@ -199,6 +199,43 @@ impl Identity {
         }
     }
 
+    /// The raw protobuf-encoded private key bytes — the same bytes
+    /// [`Self::create`] writes to disk — for transfer to another device.
+    pub fn export_bytes(&self) -> Result<Vec<u8>> {
+        Ok(self.signing_key.to_protobuf_encoding()?)
+    }
+
+    /// Serializes this identity's private key into a transferable, encrypted
+    /// envelope — the same Argon2id + XChaCha20-Poly1305 construction used
+    /// for encrypted-at-rest files, so an exported key benefits from the same
+    /// KDF + AEAD guarantees while in transit. `passphrase` must be supplied
+    /// again on import; there is no recoverable-forget-this-passphrase.
+    pub fn export_encrypted(&self, passphrase: &str) -> Result<Vec<u8>> {
+        let plaintext = self.export_bytes()?;
+        encrypt_key_envelope(&plaintext, passphrase.as_bytes())
+    }
+
+    /// Imports a private key from an [`Self::export_encrypted`] envelope,
+    /// validating the passphrase and the envelope's integrity before use.
+    /// Returns the identity in memory without touching disk — the caller
+    /// decides when (and whether) it is persisted.
+    pub fn import_from_encrypted(bytes: &[u8], passphrase: &str) -> Result<Self> {
+        let plaintext = decrypt_key_envelope(bytes, passphrase.as_bytes())?;
+        let signing_key = Keypair::from_protobuf_encoding(&plaintext)
+            .map_err(|e| anyhow::anyhow!("decrypted identity is not a valid keypair: {e}"))?;
+        Ok(Self::from_keypair(signing_key))
+    }
+
+    /// Parses a private key from raw protobuf bytes (as produced by
+    /// [`Self::export_bytes`]) back into an `Identity` in memory, without
+    /// touching disk. Used by the LAN pairing flow, where the identity key
+    /// crosses over the encrypted pairing channel.
+    pub fn import_bytes(bytes: &[u8]) -> Result<Self> {
+        let signing_key = Keypair::from_protobuf_encoding(bytes)
+            .map_err(|e| anyhow::anyhow!("invalid identity keypair bytes: {e}"))?;
+        Ok(Self::from_keypair(signing_key))
+    }
+
     fn from_keypair(signing_key: Keypair) -> Self {
         let peer_id = PeerId::from(signing_key.public());
         let identity_id = format!("canopee://identity/{}", peer_id);
@@ -216,7 +253,7 @@ impl Identity {
 ///
 /// Layout (all multi-byte integers little-endian):
 ///   `ENCRYPTED_MAGIC` (12 bytes)
-///   `ENCRYPTED_VERSION` (16 bytes, ASCII, nul-terminated)
+///   `ENCRYPTED_VERSION` (18 bytes, ASCII)
 ///   argon2 memory cost      u32
 ///   argon2 time cost        u32
 ///   argon2 parallelism      u32
@@ -448,4 +485,38 @@ async fn encrypted_key_material_differs_from_plaintext() {
     let debug_enc = format!("{enc:?}");
     assert!(!debug_enc.contains("signing_key"), "Debug must redact the signing key");
     let _ = plain.keypair();
+}
+
+#[tokio::test]
+async fn exported_identity_round_trips_through_encrypted_bytes() {
+    let identity = Identity::create("./export_roundtrip.key").await.unwrap();
+    let id = identity.id().clone();
+    let dh = identity.dh_public_key();
+
+    let bytes = identity.export_encrypted("transfer secret").unwrap();
+    assert_ne!(
+        bytes,
+        identity.export_bytes().unwrap(),
+        "encrypted export must not equal plaintext key bytes"
+    );
+
+    let imported = Identity::import_from_encrypted(&bytes, "transfer secret").unwrap();
+    assert_eq!(imported.id(), &id);
+    assert_eq!(imported.dh_public_key(), dh);
+    assert_eq!(imported.export_bytes().unwrap(), identity.export_bytes().unwrap());
+}
+
+#[tokio::test]
+async fn exported_encrypted_identity_rejects_wrong_passphrase() {
+    let identity = Identity::create("./export_wrong_pw.key").await.unwrap();
+    let bytes = identity.export_encrypted("right").unwrap();
+
+    let bad = Identity::import_from_encrypted(&bytes, "wrong");
+    assert!(bad.is_err(), "wrong passphrase must fail to import");
+}
+
+#[test]
+fn exported_encrypted_identity_rejects_garbage() {
+    let result = Identity::import_from_encrypted(b"not an envelope at all", "pw");
+    assert!(result.is_err(), "garbage must fail to import");
 }

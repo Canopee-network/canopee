@@ -134,18 +134,23 @@ knows which owner they're looking for.
 
 ## Key management
 
-- **No revocation.** If an identity's private key is compromised, there is
-  no mechanism to invalidate objects or pointers already signed with it —
-  Ed25519 key rotation isn't designed for anywhere in
+- **No revocation of the account key.** If an identity's private key is
+  compromised, there is no mechanism to invalidate objects or pointers
+  already signed with it — Ed25519 key rotation isn't designed for
+  anywhere in
   [`canopee-identity`](../crates/canopee-identity/README.md). A
   compromised key can keep publishing indefinitely under the victim's
   established identity until the victim notices and tells their contacts
   to stop trusting that `IdentityId` — a purely social, out-of-band
-  mitigation, not a protocol-level one. This also means there's no
-  device-scoped way to use one identity from multiple devices safely —
-  see [`multi-device-identity.md`](multi-device-identity.md), whose only
-  option today is copying the same private key to every device, with the
-  same lack of revocation and no per-device trust separation at all.
+  mitigation, not a protocol-level one. Multi-device identity doesn't
+  change this: devices now pair with their own per-device `PeerId` keys
+  and register on the `(owner, "devices")` list (see
+  [`multi-device-identity.md`](multi-device-identity.md)), a compromised
+  device can be dropped from that list, and the manual `export-identity` /
+  `import-identity` key-copy path still exists as a non-LAN fallback — but
+  the shared *account* key is still one secret, and there's still no way
+  to revoke a single device's copy without denying the account's keys
+  everywhere.
 - **The private key file can be stored unencrypted on disk (the default).**
   `Identity::create`/`load` write/read raw protobuf-encoded key bytes with
   no passphrase or OS-keychain integration

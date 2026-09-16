@@ -1,0 +1,20 @@
+[package]
+name = "canopee-gateway"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.10"
+tokio = { version = "1", features = ["full"] }
+
+canopee-sdk = { path = "../canopee-sdk" }
+canopee-identity = { path = "../canopee-identity" }
+canopee-storage = { path = "../canopee-storage" }
+
+[dev-dependencies]
+canopee-node = { path = "../canopee-node" }
+canopee-runtime = { path = "../canopee-runtime" }

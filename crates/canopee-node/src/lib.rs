@@ -1,4 +1,4 @@
-use canopee_protocol::{NodeCommand, NodeResponse};
+use canopee_protocol::{DeviceInfo, NodeCommand, NodeResponse};
 use canopee_runtime::Runtime;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -526,6 +526,139 @@ impl Node {
                     Ok(record) => NodeResponse::Username {
                         username: record.map(|r| r.username),
                     },
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+
+            NodeCommand::ExportIdentity { passphrase } => {
+                match self.runtime.export_identity(&passphrase) {
+                    Ok(bytes) => NodeResponse::IdentityExported { bytes },
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+
+            NodeCommand::ImportIdentity {
+                bytes,
+                passphrase,
+                overwrite,
+            } => match self
+                .runtime
+                .import_identity(&bytes, &passphrase, overwrite)
+                .await
+            {
+                Ok(identity_id) => NodeResponse::IdentityImported { identity_id },
+                Err(e) => NodeResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+
+            NodeCommand::Device => {
+                let peer_id = self.runtime.device_key.peer_id().to_string();
+                let device_name = self.runtime.device_key.device_name().to_string();
+                NodeResponse::Device {
+                    peer_id,
+                    device_name,
+                }
+            }
+
+            NodeCommand::DeviceList => {
+                match self
+                    .runtime
+                    .load_device_list(self.runtime.identity().id())
+                    .await
+                {
+                    Ok(list) => NodeResponse::DeviceList {
+                        devices: list
+                            .map(|l| {
+                                l.devices
+                                .into_iter()
+                                .map(|d| DeviceInfo {
+                                    device_id: d.device_id,
+                                    device_name: d.device_name,
+                                })
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    },
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+
+            NodeCommand::ResolveOwnerDevice { owner } => {
+                match self.runtime.resolve_device_peer_id(&owner).await {
+                    Ok(peer_id) => NodeResponse::OwnerDevice {
+                        peer_id: peer_id.map(|p| p.to_string()),
+                    },
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+
+            NodeCommand::AddDevice {
+                device_id,
+                device_name,
+            } => match self
+                .runtime
+                .add_device(&device_id, &device_name)
+                .await
+            {
+                Ok(_) => NodeResponse::DeviceAdded,
+                Err(e) => NodeResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+
+            NodeCommand::RemoveDevice { device_id } => {
+                match self.runtime.remove_device(&device_id).await {
+                    Ok(_) => NodeResponse::DeviceRemoved,
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+
+            NodeCommand::InitiatePairing => {
+                match self.runtime.initiate_pairing().await {
+                    Ok(qr) => NodeResponse::PairingQr { qr },
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+
+            NodeCommand::CompletePairing { qr, code } => {
+                match self.runtime.complete_pairing(qr, &code).await {
+                    Ok(message) => NodeResponse::PairingComplete { message },
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+
+            NodeCommand::SyncFromPeer { peer_id } => {
+                match peer_id.parse() {
+                    Ok(peer_id) => match self.runtime.sync_with_peer(peer_id).await {
+                        Ok(result) => NodeResponse::SyncComplete { result },
+                        Err(e) => NodeResponse::Error {
+                            message: e.to_string(),
+                        },
+                    },
+                    Err(e) => NodeResponse::Error {
+                        message: format!("invalid peer id: {e}"),
+                    },
+                }
+            }
+
+            NodeCommand::SyncDeviceList => {
+                match self.runtime.sync_with_all_devices().await {
+                    Ok(result) => NodeResponse::SyncComplete { result },
                     Err(e) => NodeResponse::Error {
                         message: e.to_string(),
                     },

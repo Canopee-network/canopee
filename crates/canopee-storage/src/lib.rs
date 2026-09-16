@@ -8,11 +8,14 @@ mod user;
 
 pub use cache::{Cache, CacheIndex};
 pub use export_bundle::ExportBundle;
-pub use object::{AppManifest, Export, Object, ObjectInfo, ObjectType, Verify};
+pub use crate::object::{
+    AppManifest, Export, Object, ObjectInfo, ObjectMetadata, ObjectPayload, ObjectType, Verify,
+};
 pub use object_id::ObjectId;
 pub use pointer::AppPointerRecord;
 pub use storage::Storage;
 pub use user::{
-    Contact, ContactList, HomeEntry, HomeIndex, Profile, UsernameRecord, RECORD_CONTACTS,
-    RECORD_HOME, RECORD_PROFILE, RECORD_USERNAME, USERNAME_REGISTRY_PREFIX,
+    Contact, ContactList, DeviceEntry, DeviceList, HomeEntry, HomeIndex, Profile, UsernameRecord,
+    DEVICE_REGISTRY_PREFIX, RECORD_CONTACTS, RECORD_DEVICES, RECORD_HOME, RECORD_PROFILE,
+    RECORD_USERNAME, USERNAME_REGISTRY_PREFIX,
 };

@@ -7,6 +7,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 mod app;
 mod uri;
 use app::{fetch_app, publish_directory, serve};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use std::path::Path;
 
 #[derive(Parser)]
@@ -20,6 +22,18 @@ struct Cli {
 enum Commands {
     Init,
     Identity,
+    /// Prints this machine's device `PeerId` (from its per-device key) and
+    /// the human-friendly device name it registers under its identity.
+    Device,
+    /// Lists the devices currently carrying this node's identity, as recorded
+    /// in its `(owner, "devices")` list.
+    Devices,
+    /// Shows or edits this node's profile (display name).
+    Profile {
+        /// Set the display name. Omit to show the current profile.
+        #[arg(long)]
+        name: Option<String>,
+    },
     List,
     Start,
     Get {
@@ -134,6 +148,66 @@ enum Commands {
         #[command(subcommand)]
         command: UsernameCommand,
     },
+    /// Exposes the node to a browser tab as a local WebSocket gateway. Prints
+    /// the demo URL (open this in a browser), then serves `http://127.0.0.1:
+    /// <port>/` (demo page) and `ws://127.0.0.1:<port>/?token=…` (the JSON
+    /// WebSocket bridge `crates/canopee-gateway/www/client.js` speaks).
+    ///
+    /// Access is restricted to the same machine: loopback bound, session-token
+    /// gated, non-loopback `Origin`s rejected. The demo page injects the token
+    /// itself, so visiting the printed URL gives a working bridge with nothing
+    /// to configure. See `docs/gateway-tutorial.md`.
+    Gateway {
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    /// Exports the identity key as an encrypted file for transfer to another
+    /// device (`canopee export-identity --passphrase … [--output path]`). The
+    /// default output path is `identity-export.bin`.
+    ExportIdentity {
+        #[arg(long)]
+        passphrase: String,
+        #[arg(long, default_value = "identity-export.bin")]
+        output: String,
+    },
+    /// Imports an identity key previously exported via `export-identity`
+    /// (`canopee import-identity <path> --passphrase … [--overwrite]`). The
+    /// imported key is written to disk; restart the node to adopt it.
+    ImportIdentity {
+        /// Path to the exported key file.
+        path: String,
+        #[arg(long)]
+        passphrase: String,
+        /// Overwrite the existing identity (the old key is backed up before
+        /// replacement).
+        #[arg(long)]
+        overwrite: bool,
+    },
+    /// Pairs this node with another device on the same LAN so they share one
+    /// identity.
+    ///
+    /// Run `canopee pair` (no arguments) on the NEW device: it prints a
+    /// 12-character pairing code and a QR payload. On the device that already
+    /// carries the identity, run:
+    /// `canopee pair <qr-payload> --code <12-char-code>`
+    /// where `<code>` is the code the new device displayed — typing it is the
+    /// explicit approval; the code itself never travels over the wire.
+    Pair {
+        /// The QR payload printed by `canopee pair` on the new device, as a
+        /// base64 blob. Omit to run the new-device side (print a code).
+        qr: Option<String>,
+        /// The 12-character pairing code shown on the new device. If omitted,
+        /// you are prompted for it.
+        #[arg(long)]
+        code: Option<String>,
+    },
+    /// Refreshes this node's user records (profile, contacts, devices) from
+    /// the network. With no argument, syncs from every registered device;
+    /// with a peer id, syncs from that specific peer.
+    Sync {
+        /// The peer id to sync from. Omit to sync from all devices.
+        peer_id: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -191,6 +265,61 @@ async fn main() {
                     eprintln!("{}", message);
                 }
                 _ => {}
+            }
+        }
+
+        Commands::Device => {
+            let client = CanopeeClient::connect().await.unwrap();
+            match client.device().await {
+                Ok((peer_id, device_name)) => {
+                    println!("{peer_id}");
+                    println!("{device_name}");
+                }
+                Err(e) => eprintln!("Error: {e}"),
+            }
+        }
+
+        Commands::Devices => {
+            let client = CanopeeClient::connect().await.unwrap();
+            match client.device_list().await {
+                Ok(devices) => {
+                    if devices.is_empty() {
+                        println!("No devices registered for this identity yet");
+                    }
+                    for device in devices {
+                        println!("{} ({})", device.device_id, device.device_name);
+                    }
+                }
+                Err(e) => eprintln!("Error: {e}"),
+            }
+        }
+
+        Commands::Profile { name } => {
+            let client = CanopeeClient::connect().await.unwrap();
+            match name {
+                None => match client.load_profile().await {
+                    Ok(Some(profile)) => {
+                        println!("Display name: {}", profile.display_name);
+                        println!("Version: {}", profile.version);
+                    }
+                    Ok(None) => println!("No profile set yet"),
+                    Err(e) => eprintln!("Error: {e}"),
+                },
+                Some(name) => {
+                    let current = client.load_profile().await.unwrap_or(None);
+                    let profile = canopee_storage::Profile {
+                        display_name: name,
+                        dh_public_key: current
+                            .map(|p| p.dh_public_key)
+                            .unwrap_or([0u8; 32]),
+                        avatar: None,
+                        version: 0, // overwritten by the runtime
+                    };
+                    match client.save_profile(&profile).await {
+                        Ok(id) => println!("Profile saved: {id}"),
+                        Err(e) => eprintln!("Error: {e}"),
+                    }
+                }
             }
         }
 
@@ -804,6 +933,39 @@ async fn main() {
             }
         },
 
+        Commands::Gateway { port } => {
+            let token = canopee_gateway::SessionToken::new();
+            let gateway = match canopee_gateway::Gateway::start_on(token.clone(), port).await {
+                Ok(gateway) => gateway,
+                Err(e) => {
+                    eprintln!("Error: {e:#}");
+                    std::process::exit(1);
+                }
+            };
+
+            println!("Canopee gateway ready for this machine only:");
+            println!("  Demo page: {}", gateway.page_url());
+            println!("  WebSocket: {}", gateway.session_url(&token));
+            println!();
+            println!(
+                "Open the demo page in a browser, or point your app's JavaScript at the \
+                 WebSocket URL with the client from crates/canopee-gateway/www/client.js."
+            );
+            println!("Press Ctrl-C to stop.");
+
+            tokio::select! {
+                result = gateway.serve() => {
+                    if let Err(e) = result {
+                        eprintln!("Gateway error: {e:#}");
+                        std::process::exit(1);
+                    }
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    println!("Stopping gateway");
+                }
+            }
+        }
+
         Commands::Username { command } => {
             let client = CanopeeClient::connect().await.unwrap();
             match command {
@@ -838,6 +1000,146 @@ async fn main() {
                 }
             }
         }
+
+        Commands::ExportIdentity { passphrase, output } => {
+            let client = CanopeeClient::connect().await.unwrap();
+            match client.export_identity(passphrase).await {
+                Ok(bytes) => {
+                    tokio::fs::write(&output, &bytes).await.unwrap();
+                    println!(
+                        "Wrote {} encrypted identity bytes to {}",
+                        bytes.len(),
+                        output
+                    );
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Commands::ImportIdentity {
+            path,
+            passphrase,
+            overwrite,
+        } => {
+            let bytes = tokio::fs::read(&path).await.unwrap();
+            let client = CanopeeClient::connect().await.unwrap();
+            match client.import_identity(bytes, passphrase, overwrite).await {
+                Ok(identity_id) => {
+                    println!("Imported identity {identity_id}");
+                    println!("Restart the node to adopt it.");
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Commands::Pair { qr, code } => {
+            let client = CanopeeClient::connect().await.unwrap();
+            match qr {
+                // New-device side: mint a code/session and print the QR payload
+                // for the user to read off to the other machine.
+                None => match client.pair_initiate().await {
+                    Ok(qr) => {
+                        let payload =
+                            bincode::serialize(&qr).expect("pairing QR serializes");
+                        println!("Pairing code: {}", qr.code);
+                        println!();
+                        println!(
+                            "Scan this QR (or read this payload to the other device) and run:"
+                        );
+                        println!("  canopee pair {} --code {}", BASE64.encode(&payload), qr.code);
+                        println!();
+                        println!(
+                            "The source device will copy your identity to {} ({}).",
+                            qr.device_name, qr.device_id
+                        );
+                        println!("Restart this node after pairing to take the identity over.");
+                    }
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    }
+                },
+                // Source-device side: verify the user-typed code, and deliver
+                // the identity to the new device over the LAN.
+                Some(payload_b64) => {
+                    let bytes = match BASE64.decode(payload_b64.as_bytes()) {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            eprintln!("The QR payload is not valid base64: {e}");
+                            std::process::exit(1);
+                        }
+                    };
+                    let qr: canopee_protocol::PairingQrData =
+                        match bincode::deserialize(&bytes) {
+                            Ok(qr) => qr,
+                            Err(e) => {
+                                eprintln!("The QR payload is not valid pairing data: {e}");
+                                std::process::exit(1);
+                            }
+                        };
+                    let code = match code {
+                        Some(code) => code,
+                        None => {
+                            use std::io::BufRead;
+                            print!("Type the pairing code shown on the device to approve: ");
+                            let _ = std::io::Write::flush(&mut std::io::stdout());
+                            let mut line = String::new();
+                            std::io::stdin().lock().read_line(&mut line).unwrap();
+                            line.trim().to_string()
+                        }
+                    };
+                    println!(
+                        "Pairing {} …",
+                        short_peer_id(&qr.device_id)
+                    );
+                    match client.pair_complete(qr, code).await {
+                        Ok(message) => {
+                            println!("{message}");
+                        }
+                        Err(e) => {
+                            eprintln!("Error: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
+        }
+
+        Commands::Sync { peer_id } => {
+            let client = CanopeeClient::connect().await.unwrap();
+            let result = match peer_id {
+                Some(peer_id) => client.sync_with_peer(peer_id).await,
+                None => client.sync_with_all_devices().await,
+            };
+            match result {
+                Ok(result) => {
+                    if result.any_updated() {
+                        println!("Synced:");
+                        if result.profile_updated {
+                            println!("  profile updated");
+                        }
+                        if result.contacts_updated {
+                            println!("  contacts updated");
+                        }
+                        if result.devices_updated {
+                            println!("  devices updated");
+                        }
+                    } else {
+                        println!("Already up to date");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 }
 
@@ -854,30 +1156,42 @@ fn short_peer_id(peer_id: &str) -> String {
 
 /// Resolves a CLI peer argument to a dialable peer id string. Accepts:
 /// - a raw libp2p peer id (passed through),
-/// - a canonical identity `canopee://identity/<peer-id>` (peer id extracted),
-/// - a friendly username, reverse-resolved via the DHT registry.
+/// - a canonical identity `canopee://identity/<peer-id>` (resolved to one of
+///   the owner's registered *device* peer ids — since device-key separation,
+///   the identity-bound peer id is not a live network address),
+/// - a friendly username, reverse-resolved via the DHT registry to its owner,
+///   then to one of the owner's devices.
+///
+/// Falls back to the legacy identity-bound peer id when the owner has no
+/// registered device (e.g. pre-device-key peers), keeping the old dial path
+/// working for already-paired peers.
 async fn resolve_peer_arg(client: &CanopeeClient, arg: &str) -> anyhow::Result<String> {
     let arg = arg.trim();
-    // Canonical identity form: extract the embedded peer id.
-    if let Some(peer_id) = arg.strip_prefix("canopee://identity/") {
-        return Ok(peer_id.to_string());
-    }
     // Raw peer id: libp2p Ed25519 peer ids always start with this prefix.
     if arg.starts_with("12D3KooW") {
         return Ok(arg.to_string());
     }
-    // Otherwise treat it as a username and reverse-resolve it.
-    match client.resolve_username(arg).await? {
-        Some(owner) => {
-            let owner = owner.to_string();
-            owner
-                .strip_prefix("canopee://identity/")
-                .map(|s| s.to_string())
-                .ok_or_else(|| anyhow::anyhow!("malformed owner identity: {owner}"))
-        }
-        None => anyhow::bail!(
+    // Canonical identity form: the embedded peer id doubles as the owner.
+    let owner = if let Some(peer_id) = arg.strip_prefix("canopee://identity/") {
+        Some(canopee_sdk::IdentityId::new(format!("canopee://identity/{peer_id}")))
+    } else {
+        // Otherwise treat it as a username and reverse-resolve it to its owner.
+        client.resolve_username(arg).await?
+    };
+    let Some(owner) = owner else {
+        anyhow::bail!(
             "\"{arg}\" is not a valid peer id, and no username \"{arg}\" is claimed \
              (check with `canopee username lookup {arg}`)"
-        ),
+        );
+    };
+    // Prefer the owner's registered device (device-key phase); fall back to
+    // the identity-bound peer id for legacy peers that never registered.
+    if let Some(device) = client.resolve_owner_device(&owner).await? {
+        return Ok(device);
     }
+    owner
+        .to_string()
+        .strip_prefix("canopee://identity/")
+        .map(|s| s.to_string())
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve \"{arg}\" to a dialable peer"))
 }

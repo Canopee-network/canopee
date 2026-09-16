@@ -30,12 +30,15 @@ Three real design differences, not just "it's also P2P":
 
 In IPFS, content addressing (CIDs), naming (IPNS), and pub/sub evolved as
 related but somewhat separate subsystems layered onto the stack over time.
-Canopee's single [`Identity`](../crates/canopee-identity/README.md) backs
-*everything* directly: object signing, the libp2p `PeerId`, gossipsub
-message authorship, and `AppPointerRecord` signatures are all the same
-keypair, deliberately — see `canopee-identity/README.md`'s design notes on
-why one keypair serves both the network address and the signing identity.
-There's no separate "login" or credential per feature.
+Canopee is deliberately the opposite: one account
+[`Identity`](../crates/canopee-identity/README.md) backs everything a
+*person* does — object signing, user-record and `AppPointerRecord`
+signatures, and the `canopee://identity/<id>` URI — with no separate
+"login" or credential per feature. The libp2p `PeerId` a machine connects
+with is one layer down: it comes from a per-device `DeviceKey`, so "who
+signed this" (the account) and "which device is serving it" (the swarm
+`PeerId`) stay independent — several devices of one identity can be online
+at once. See `canopee-identity/README.md`'s "Account key vs. device key."
 
 ### 2. App manifests + app pointers as an opinionated, first-class publishing pipeline
 
@@ -62,11 +65,14 @@ needs relaying itself — is a deliberate, stated choice, not an oversight.
 
 This isn't a "Canopee wins" comparison. Concretely, today:
 
-- **No encryption anywhere** — see
-  [`security-considerations.md`](security-considerations.md) for the full
-  list (message content, transport TLS, key-at-rest). IPFS/Iroh have the
-  same gap in different forms, but it's still a real gap here, not a
-  differentiator.
+- **No message-content or certificate-authenticated end-to-end encryption.**
+  Objects are signed but not encrypted at the application layer; the
+  libp2p transport is Noise-encrypted hop-by-hop (relayed hops excepted),
+  and there's no TLS-with-certificates layer. Key-at-rest, by contrast,
+  is handled (opt-in — set `CANOPEE_IDENTITY_PASS` to encrypt the identity
+  file). See [`security-considerations.md`](security-considerations.md)
+  for the full list. IPFS/Iroh have the same gaps in different forms, but
+  they're still real gaps here, not a differentiator.
 - **A minimal bootstrap relay list (hardcoded, single entry) exists, but
   no community-maintained discovery yet** — [`bootstrap-nodes-tutorial.md`](bootstrap-nodes-tutorial.md)
   describes the built-in defaults and the (written, not implemented) DNS

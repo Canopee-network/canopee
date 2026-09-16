@@ -4,6 +4,8 @@ pub mod message;
 pub mod peer;
 
 pub use libp2p::{Multiaddr, PeerId};
-pub use manager::{NetworkManager, ObjectProvider};
-pub use message::{ObjectRequest, ObjectResponse, PubSubMessage};
+pub use manager::{InboundPairing, NetworkManager, ObjectProvider};
+pub use message::{
+    CanopeePairingRequest, CanopeePairingResponse, ObjectRequest, ObjectResponse, PubSubMessage,
+};
 pub use peer::{Peer, RelayReservation};

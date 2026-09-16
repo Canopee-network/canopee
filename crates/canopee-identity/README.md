@@ -1,18 +1,31 @@
 # canopee-identity
 
-Ed25519 keypair management for a Canopee node. Every node has exactly one
-identity, created on first run and reused forever after — it's both the
-node's signing key (for content-addressed objects, see
-[`canopee-storage`](../canopee-storage)) and its libp2p `PeerId` (for the
-network layer, see [`canopee-network`](../canopee-network)).
+Ed25519 keypair management for a Canopee identity. `Identity` is the
+**account key**, created on first run and reused forever after: it signs
+content-addressed objects (see [`canopee-storage`](../canopee-storage))
+and derives the `IdentityId` (`canopee://identity/<peer-id>`). It is no
+longer the node's libp2p `PeerId` — since device-key separation, each
+machine's swarm connects with its own [`DeviceKey`] (the *device* key,
+see [`canopee-network`](../canopee-network)), so several devices of one
+identity can be online at once without colliding on the network.
 
-## Why one keypair for both roles
+## Account key vs. device key
 
-Reusing the same Ed25519 keypair as both the storage-signing key and the
-libp2p identity means a node's network address and its object-signing
-identity are the same thing: `canopee://identity/<peer id>`. There's no
-separate "who signed this" vs "who's serving this" — an object's owner and
-the swarm peer that can prove ownership are one and the same.
+A node holds two keypairs:
+
+- **The account key (`Identity`, this crate)** — the *person*: Ed25519
+  signing + the derived X25519 DH secret. One per user; identical on every
+  device that shares the identity; signs everything that belongs to them.
+- **The device key (`DeviceKey`, also in this crate)** — the *machine*:
+  an Ed25519 keypair minted once per device and never transferred. Its
+  public key is the libp2p `PeerId` the swarm dials and serves with.
+
+The account public key still derives a `PeerId`, used for the identity
+URI — `canopee://identity/<peer id>`. The running swarm, however, uses
+the device key's `PeerId`. Peers link the two via `device:<peer-id> →
+identity` registry records and the owner's `(owner, "devices")` list, so
+"whose device is this" and "which device do I dial for this owner" are
+both answerable.
 
 ## API
 
@@ -36,7 +49,8 @@ assert!(identity.verify(b"some payload", &signature));
 // Protobuf-encoded public key, e.g. for embedding in a signed object.
 let public_key_bytes = identity.public_key_bytes();
 
-// The full libp2p Keypair, e.g. for handing to a SwarmBuilder.
+// The account keypair, for signing derivatives and tests — the running
+// swarm (and its `PeerId`) is built from the device key, not this one.
 let keypair = identity.keypair();
 
 // X25519 key agreement, for end-to-end encryption above this crate (see
@@ -56,6 +70,7 @@ let (identity, encrypted_at_rest) = Identity::load_encrypted(
 |---|---|
 | `Identity` | Holds the keypair and derived `IdentityId`; sign/verify/create/load/encrypted-at-rest |
 | `IdentityId` | `canopee://identity/<PeerId>` — the node's public, stable address |
+| `DeviceKey` | Per-device Ed25519 keypair; its public key is the machine's libp2p `PeerId` |
 
 `IdentityId::new(id)` builds one from a raw string — e.g. one another user
 shared out of band (an identity string printed by their `canopee identity`)

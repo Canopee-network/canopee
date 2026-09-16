@@ -20,8 +20,8 @@ byte-for-byte — exactly what any static host (Netlify, GitHub Pages, nginx)
 does. It is exactly as dynamic as the JavaScript you bundled into it, and
 not one bit more: a React SPA published this way can still fetch from
 regular web APIs, animate, route client-side, whatever plain JS in a
-browser can already do — it just can't reach back into Canopee itself,
-because nothing bridges a browser tab to a running node (see
+browser can already do — and, if a local [`canopee gateway`](gateway-tutorial.md)
+is running, it can even reach back into Canopee itself and drive the SDK (see
 [Where they meet](#where-they-meet) below).
 
 **A Canopee app (built on `canopee-sdk`)** is *a real program* — a process
@@ -46,7 +46,7 @@ network**, same standing as any `canopee-node`'s own CLI.
 | What it is | A signed `AppManifest` object + the files it points to | A process linking `canopee-sdk` |
 | Where it runs | In a browser, fetched via `canopee open` | Wherever you run the binary — a server, a CLI, a background service |
 | Lifecycle | Published once (or republished under the same name — see [app pointers](app-manifests.md#resolving-by-name-app-pointers)); inert between publishes | Runs continuously, or invoked per-command, like any normal program |
-| Network capability | None directly — can only do what plain browser JS can do (fetch, WebSocket to some *other* server, etc.) | Full: `put`/`get`/`export`/`import` objects, `dial`, `announce`/`find_providers`, `publish_app_pointer`/`resolve_app_pointer`, gossipsub `publish`/`subscribe` |
+| Network capability | None directly — plain browser JS. Via the [gateway](gateway-tutorial.md) (`canopee gateway`), a published app *can* drive the SDK from the tab | Full: `put`/`get`/`export`/`import` objects, `dial`, `announce`/`find_providers`, `publish_app_pointer`/`resolve_app_pointer`, gossipsub `publish`/`subscribe` |
 | Analogy | A file on IPFS / a page on Netlify | A daemon, bot, or CLI tool that happens to use Canopee as its backend |
 | Concrete example | Alice's portfolio site, [`spa-hosting-tutorial.md`](spa-hosting-tutorial.md)'s React app | `canopee-cli` itself, or [`crates/canopee-sdk/examples/app.rs`](../crates/canopee-sdk/examples/app.rs) |
 
@@ -55,40 +55,36 @@ network**, same standing as any `canopee-node`'s own CLI.
 A published SPA and a `canopee-sdk` app aren't mutually exclusive — you can
 build a React frontend (published via `app-manifest`) that's *meant* to be
 the UI for a Canopee-native feature, e.g. a chat app, a file-sharing tool,
-a collaborative doc. But the moment that frontend needs to actually call
-`announce`, `subscribe` to a topic, or resolve an app pointer, it hits a
-wall: **nothing bridges a browser tab to `canopee-sdk`'s Unix-socket
-protocol.** `canopee-node`'s socket isn't reachable from a browser sandbox,
-and there's no HTTP/WebSocket gateway in front of it today (unlike, say,
-how `canopee open`'s own HTTP server exists purely to serve static files,
-not to proxy the protocol).
+a collaborative doc. The question is who does the talking to the network.
 
-In practice, today, that means:
+There are two supported answers today:
 
-- The *real* Canopee-facing logic — talking to peers, the DHT, pub/sub —
-  has to live in a `canopee-sdk`-linked backend process, not in the
-  published frontend's JS.
-- The published static frontend can talk to that backend process some
-  other way (e.g. it exposes its own regular HTTP/WebSocket API that the
-  frontend calls with `fetch`/`WebSocket`, unrelated to Canopee's own
-  protocol) — but at that point you're running an ordinary client-server
-  app, with Canopee only involved on the backend half and as the static
-  file host for the frontend half.
-- There is currently no supported way for code running *inside* a
-  published app's browser tab to directly drive `canopee-sdk` calls. If
-  you want that, it's a real, unbuilt feature — something like a
-  WebSocket/HTTP gateway in front of the node's Unix socket, exposing a
-  safe subset of `NodeCommand`s to browser JS. Nothing in this repo
-  attempts that yet; treat it as an open design question, not a documented
-  limitation with a workaround.
-- **This is only true for a plain browser tab.** A desktop shell like
-  [Tauri](https://tauri.app) sidesteps the whole problem: its Rust backend
-  can link `canopee-sdk`/`canopee-runtime` directly and expose it to the
-  same app's frontend over Tauri's own IPC — no gateway needed, because
-  the "backend" and the "UI" ship as one app instead of a webpage talking
-  to a socket it can't reach. See
-  [`tauri-chat-app-tutorial.md`](tauri-chat-app-tutorial.md) for a worked
-  example.
+- **Run a gateway and let the browser talk directly.** [`canopee gateway`]
+  (`gateway-tutorial.md` is the worked example) runs a loopback-only
+  WebSocket bridge in front of the node's Unix socket. A published app's
+  JavaScript opens that WebSocket and drives the SDK from the tab — `put`/
+  `get`, pub/sub, app pointers, object sharing — via the tiny
+  [`www/client.js`](../crates/canopee-gateway/www/client.js) helper. The
+  gateway is a strict local trust domain: it binds loopback only, requires a
+  per-process session token, and rejects handshakes whose `Origin` isn't a
+  loopback origin, so a remote site can't reach it. This is the closest
+  thing to "the app is a first-class peer" that runs purely in a browser.
+- **Keep a desktop shell, or a plain backend process.** A desktop shell like
+  [Tauri](https://tauri.app) sidesteps the problem entirely: its Rust backend
+  links `canopee-sdk`/`canopee-runtime` directly and exposes it to the same
+  app's frontend over Tauri's own IPC — no gateway needed, because the
+  "backend" and the "UI" ship as one app instead of a webpage talking to a
+  socket it can't reach. Or, the classic fallback: put the *real*
+  Canopee-facing logic (peers, DHT, pub/sub) in a `canopee-sdk`-linked
+  backend process and have the published frontend call that backend over a
+  plain HTTP/WebSocket API of its own. At that point you're running an
+  ordinary client-server app, with Canopee involved only on the backend half
+  and as the static file host for the frontend half.
+
+In both cases the *pure static publish* story is unchanged: the static
+files are still bytes served by `canopee open`, byte-for-byte. What the
+gateway adds is a way for those bytes' JavaScript to reach a running node
+on the same machine.
 
 ## Which one do you want?
 
@@ -114,6 +110,6 @@ In practice, today, that means:
   for progressively more involved ones. [`app-ideas.md`](app-ideas.md)
   has a longer list beyond what has a tutorial yet.
 - **Want a browser-based UI for something built on `canopee-sdk`, with no
-  desktop shell?** You'll still need your own bridge between the two
-  today — see [Where they meet](#where-they-meet) above. This is the one
-  combination that isn't already solved for you.
+  desktop shell?** Use [`canopee gateway`](gateway-tutorial.md): it bridges
+  the node's Unix socket to a loopback WebSocket that browser JavaScript can
+  open, so a published app can drive the SDK directly from the tab.

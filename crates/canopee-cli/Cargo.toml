@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 bincode = "1"
+base64 = "0.22"
 dirs = "5"
 anyhow = "1"
 tokio = { version = "1", features = ["full"] }
@@ -21,3 +22,4 @@ canopee-sdk = { path = "../canopee-sdk" }
 canopee-protocol = { path = "../canopee-protocol" }
 canopee-runtime = { path = "../canopee-runtime" }
 canopee-config = { path = "../canopee-config" }
+canopee-gateway = { path = "../canopee-gateway" }
