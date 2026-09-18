@@ -20,6 +20,7 @@
 //! # Examples
 //!
 //! ```
+//! use std::time::Duration;
 //! use canopee_gateway::{Gateway, SessionToken};
 //!
 //! #[tokio::main]
@@ -27,7 +28,11 @@
 //!     let token = SessionToken::new();
 //!     let gateway = Gateway::start(token.clone()).await?;
 //!     println!("{}", gateway.session_url(&token)); // ws://127.0.0.1:<port>/?token=…
-//!     gateway.serve().await?;
+//!     let serve_task = tokio::spawn(async move {
+//!         let _ = gateway.serve().await;
+//!     });
+//!     tokio::time::sleep(Duration::from_millis(10)).await;
+//!     serve_task.abort();
 //!     Ok(())
 //! }
 //! ```

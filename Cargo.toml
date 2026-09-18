@@ -1,10 +1,15 @@
-[package]
-name = "canopee"
-version = "0.1.0"
-edition = "2024"
-
 [workspace]
-members = ["crates/canopee-cli", "crates/canopee-sdk", "crates/canopee-config","crates/canopee-identity", "crates/canopee-node", "crates/canopee-protocol", "crates/canopee-runtime", "crates/canopee-storage", "crates/canopee-network", "crates/canopee-e2e", "crates/canopee-gateway"]
+members = [
+    "crates/canopee-cli",
+    "crates/canopee-config",
+    "crates/canopee-e2e",
+    "crates/canopee-gateway",
+    "crates/canopee-identity",
+    "crates/canopee-network",
+    "crates/canopee-node",
+    "crates/canopee-protocol",
+    "crates/canopee-runtime",
+    "crates/canopee-sdk",
+    "crates/canopee-storage",
+]
 resolver = "3"
-
-[dependencies]

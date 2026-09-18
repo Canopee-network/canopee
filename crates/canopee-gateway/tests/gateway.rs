@@ -233,7 +233,11 @@ async fn browser_drives_node_through_gateway() {
     assert_eq!(event["result"]["object"]["text"], "hello browser");
 
     let event = command(&mut ws, &json_op("list")).await.unwrap();
-    assert_eq!(event["result"]["objects"].as_array().unwrap().len(), 1);
+    let listed = event["result"]["objects"].as_array().unwrap();
+    assert!(
+        listed.iter().any(|o| o["id"].as_str() == Some(id.as_str())),
+        "stored object must appear in list, got: {listed:?}"
+    );
 
     // The node has a peerless network: publishing to nobody fails cleanly and
     // flows back over the gateway as an error event.

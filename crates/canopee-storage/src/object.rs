@@ -61,6 +61,15 @@ pub enum ObjectType {
     /// explicit per-entry `shared` flag. The entry point for "my data,
     /// across apps and devices", pointed to by `(owner, "home")`.
     HomeIndex,
+    /// A single signed capability grant (issuer → subject, permissions over a
+    /// resource; see `crate::Capability`). Usually stored inside
+    /// `CapabilityIndex` objects, but also handed around standalone so a
+    /// subject can verify a grant they received out of band.
+    Capability,
+    /// A signed index of the capability grants an owner has issued, published
+    /// under `(owner, "capabilities")` — the revocation-tracked record that
+    /// backs "who is allowed to do what" (technical vision §5.5).
+    CapabilityIndex,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

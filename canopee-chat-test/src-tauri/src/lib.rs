@@ -315,7 +315,7 @@ async fn attach_picture(state: State<'_, AppState>, path: String) -> Result<MyDa
         .to_string();
     let object = state
         .runtime
-        .put_object(bytes.clone(), ObjectType::Blob)
+        .put_object(bytes.clone(), ObjectType::Blob, None)
         .await
         .map_err(|e| e.to_string())?;
     let mut index = state

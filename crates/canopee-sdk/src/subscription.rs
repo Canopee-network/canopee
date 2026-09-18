@@ -31,14 +31,10 @@ impl Subscription {
     /// Waits for the next message on this subscription's topic.
     /// Returns `None` if the node closed the connection.
     pub async fn next(&mut self) -> anyhow::Result<Option<PubSubMessage>> {
-        loop {
-            match NodeClient::read_frame(&mut self.stream).await {
-                Ok(NodeResponse::PubSub(message)) => return Ok(Some(message)),
-                Ok(other) => {
-                    return Err(anyhow::anyhow!("Unexpected response: {other:?}"));
-                }
-                Err(_) => return Ok(None),
-            }
+        match NodeClient::read_frame(&mut self.stream).await {
+            Ok(NodeResponse::PubSub(message)) => Ok(Some(message)),
+            Ok(other) => Err(anyhow::anyhow!("Unexpected response: {other:?}")),
+            Err(_) => Ok(None),
         }
     }
 }

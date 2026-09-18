@@ -680,6 +680,62 @@ impl Node {
                     },
                 }
             }
+
+            NodeCommand::GrantCapability {
+                subject,
+                resource,
+                permissions,
+                expires_at,
+            } => match self
+                .runtime
+                .grant_capability(subject, resource, permissions, expires_at)
+                .await
+            {
+                Ok(capability) => NodeResponse::CapabilityGranted { capability },
+                Err(e) => NodeResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+
+            NodeCommand::ListCapabilities => match self.runtime.list_capabilities().await {
+                Ok(index) => NodeResponse::Capabilities { index },
+                Err(e) => NodeResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+
+            NodeCommand::RevokeCapability { id } => {
+                match self.runtime.revoke_capability(&id).await {
+                    Ok(()) => NodeResponse::CapabilityRevoked,
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+
+            NodeCommand::CheckCapability { capability } => {
+                match self.runtime.check_capability(&capability).await {
+                    Ok((valid, reason)) => NodeResponse::CapabilityCheck { valid, reason },
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+
+            NodeCommand::CheckAccess {
+                subject,
+                permission,
+                resource,
+            } => match self
+                .runtime
+                .check_access(&subject, permission, &resource)
+                .await
+            {
+                Ok(allowed) => NodeResponse::AccessAllowed { allowed },
+                Err(e) => NodeResponse::Error {
+                    message: e.to_string(),
+                },
+            }
         }
     }
 }

@@ -6,8 +6,8 @@ use canopee_protocol::{
     SyncResult,
 };
 use canopee_storage::{
-    AppPointerRecord, ContactList, ExportBundle, HomeIndex, Object, ObjectId, ObjectInfo,
-    ObjectType, Profile,
+    AppPointerRecord, Capability, CapabilityId, CapabilityIndex, ContactList, ExportBundle,
+    HomeIndex, Object, ObjectId, ObjectInfo, ObjectType, Permission, Profile, Resource,
 };
 /// Entry point for apps that want to use a Canopee node's identity, storage,
 /// and network capabilities. Talks to the locally running node over its Unix
@@ -571,6 +571,98 @@ impl CanopeeClient {
     /// no longer served). Shorthand for `set_home_entry_shared(name, false)`.
     pub async fn unshare(&self, name: impl Into<String>) -> anyhow::Result<ObjectId> {
         self.set_home_entry_shared(name, false).await
+    }
+
+    // ---- capabilities ("who is allowed to do what") ----
+
+    /// Issues a signed capability on behalf of the node's identity: grants
+    /// `subject` `permissions` over `resource`, optionally expiring at
+    /// `expires_at` (unix seconds). The signed grant is stored locally and
+    /// returned so it can be hand-delivered to the subject out of band.
+    pub async fn grant_capability(
+        &self,
+        subject: IdentityId,
+        resource: Resource,
+        permissions: Vec<Permission>,
+        expires_at: Option<u64>,
+    ) -> anyhow::Result<Capability> {
+        match self
+            .request(NodeCommand::GrantCapability {
+                subject,
+                resource,
+                permissions,
+                expires_at,
+            })
+            .await?
+        {
+            NodeResponse::CapabilityGranted { capability } => Ok(capability),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// The capability grants the node's identity has issued, from the
+    /// `(owner, "capabilities")` record (revocation state included). `None`
+    /// until the first grant.
+    pub async fn list_capabilities(&self) -> anyhow::Result<Option<CapabilityIndex>> {
+        match self.request(NodeCommand::ListCapabilities).await? {
+            NodeResponse::Capabilities { index } => Ok(index),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Marks a previously issued capability as revoked (republishes the
+    /// issuer's index). The subject learns of the revocation when an app next
+    /// verifies the grant against the issuer.
+    pub async fn revoke_capability(&self, id: &CapabilityId) -> anyhow::Result<()> {
+        match self
+            .request(NodeCommand::RevokeCapability {
+                id: id.clone(),
+            })
+            .await?
+        {
+            NodeResponse::CapabilityRevoked => Ok(()),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Verifies a presented capability end to end: signature + content id +
+    /// issuer derivation, time window, and (when reachable) the issuer's
+    /// revocation index. Returns `(valid, reason)`.
+    pub async fn check_capability(
+        &self,
+        capability: &Capability,
+    ) -> anyhow::Result<(bool, String)> {
+        match self
+            .request(NodeCommand::CheckCapability {
+                capability: capability.clone(),
+            })
+            .await?
+        {
+            NodeResponse::CapabilityCheck { valid, reason } => Ok((valid, reason)),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// The issuer-side authorization check (vision §5.5): does `subject`
+    /// currently hold an unrevoked, unexpired grant from the node's identity
+    /// of `permission` on `resource`? Run this before serving a resource.
+    pub async fn check_access(
+        &self,
+        subject: &IdentityId,
+        permission: Permission,
+        resource: &Resource,
+    ) -> anyhow::Result<bool> {
+        match self
+            .request(NodeCommand::CheckAccess {
+                subject: subject.clone(),
+                permission,
+                resource: resource.clone(),
+            })
+            .await?
+        {
+            NodeResponse::AccessAllowed { allowed } => Ok(allowed),
+            other => Err(Self::unexpected(other)),
+        }
     }
 
     /// Fetches an object directly from a specific peer (typically one found

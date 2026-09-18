@@ -1,12 +1,12 @@
 # Onboarding
 
-Welcome to Canopee. This guide gets you from zero to productive: what the
-project is, how the repo is laid out, how to build and test, and the key
+Welcome to Canopee. This guide takes you from zero to productive: what the
+project is, how the repository is laid out, how to build and test, and the
 concepts you'll touch day to day.
 
 If you haven't already, read the [README](README.md) first — it covers the
-project vision and the crate map. This file is the practical "how do I work
-here" companion.
+vision and the crate map. This file is the practical "how do I work here"
+companion.
 
 ---
 
@@ -16,11 +16,12 @@ Canopee is a decentralized peer-to-peer network of nodes. Each node owns a
 cryptographic identity, stores signed content-addressed objects locally, and
 discovers/connects to other nodes over libp2p (mDNS on LAN, Kademlia DHT +
 relays over the internet). Apps talk to the local node over a Unix socket via
-`canopee-sdk` — they never touch the network stack directly.
+`canopee-sdk`, or embed `canopee-runtime` directly — they never touch the
+network stack by hand.
 
 The current focus is **multi-device identity**: one identity shared across a
-laptop, a phone, a desktop — via LAN pairing (QR + typed code) and DHT-based
-sync.
+laptop, a phone, a desktop — via LAN pairing (QR + typed code), DHT-based
+sync, and per-device keys.
 
 ---
 
@@ -32,251 +33,135 @@ The workspace is `canopee/`. Sibling directories hold apps built on it.
 CANOPEE/
 ├── canopee/                    # ← you are here (the workspace)
 │   ├── crates/
-│   │   ├── canopee-identity    # Ed25519 keypairs, signing, pairing crypto
-│   │   ├── canopee-storage     # signed content-addressed object store
-│   │   ├── canopee-network     # libp2p swarm (mDNS, DHT, gossipsub, relay)
+│   │   ├── canopee-e2e         # end-to-end tests (real node processes)
+│   │   ├── canopee-cli         # `canopee` command-line tool (binary)
 │   │   ├── canopee-config      # ~/.canopee filesystem layout + env vars
-│   │   ├── canopee-runtime     # ties identity + storage + network together
-│   │   ├── canopee-protocol    # wire types (node ↔ SDK/CLI)
+│   │   ├── canopee-gateway     # loopback WebSocket bridge (browser → node)
+│   │   ├── canopee-identity    # Ed25519 keypairs, signing, pairing crypto
+│   │   ├── canopee-network     # libp2p swarm (mDNS, DHT, gossipsub, relay)
 │   │   ├── canopee-node        # the node daemon (Unix socket server)
+│   │   ├── canopee-protocol    # wire types (node ↔ SDK/CLI)
+│   │   ├── canopee-runtime     # ties identity + storage + network together
 │   │   ├── canopee-sdk         # client library for apps
-│   │   ├── canopee-cli         # `canopee` command-line tool
-│   │   ├── canopee-gateway     # WebSocket bridge (browser → node)
-│   │   └── canopee-e2e         # end-to-end tests (real node processes)
-│   └── docs/                   # tutorials + reference docs
-├── apps/
-│   └── canopee-home            # Tauri 2 chat/home app (GUI)
-├── canopee-tray                # macOS tray app (embeds the node)
-└── interest-discovery          # example SDK app (DHT-based peer discovery)
+│   │   └── canopee-storage     # signed content-addressed object store
+│   ├── deploy/                 # systemd service setup for a public relay
+│   ├── docs/                   # → docs/README.md: the documentation tree
+│   │   ├── concepts/           #   how it works
+│   │   ├── guides/             #   how to do it
+│   │   └── reference/          #   the exacts (CLI, env, paths, protocols)
+│   ├── scripts/e2e.sh          # two-node end-to-end shell test
+│   ├── ONBOARDING.md           # ← you are here
+│   └── README.md               # overview / crate map / docs index
 ```
 
----
-
-## Prerequisites
-
-- **Rust** (stable, edition 2024). `rustup` recommended.
-- **Node.js ≥ 20.12** for the Tauri frontend (Vite 8). The default `node` on
-  this machine is v16 — use `/opt/homebrew/bin/node` (v26) or `nvm use 20+`.
-- **Xcode** (for iOS builds, optional).
-- **Android SDK** (for Android builds, optional — not installed here).
+Read [docs/README.md](docs/README.md) for the full documentation index — the
+concepts/guides/reference split is the intended entry points.
 
 ---
 
-## Quick start
+## Building
+
+Requires a Rust toolchain (edition 2024 — a recent stable).
 
 ```bash
-# Build everything
 cargo build --workspace
-
-# Start a node in the background
-cargo run -p canopee-node &
-
-# Talk to it
-cargo run -p canopee-cli -- identity
-cargo run -p canopee-cli -- profile --name Alice
-cargo run -p canopee-cli -- peers
-cargo run -p canopee-cli -- stop
 ```
 
-The node stores everything under `~/.canopee/` (identity, storage, records,
-socket). See `canopee-config` for the layout.
-
----
-
-## Key concepts
-
-### Identity
-
-- **`IdentityId`** (`canopee://identity/<peer-id>`) — the user's canonical
-  identity, derived from an Ed25519 keypair. One per person.
-- **`DeviceKey`** — a per-device keypair, distinct from the identity. Each
-  device has its own `PeerId` (from the device key) but shares the identity.
-  This is what lets two devices be "the same person" without sharing a
-  network address.
-- **Pairing** — copying an identity onto a new device over the LAN. The new
-  device shows a 12-char code + QR payload; the existing device types the
-  code to approve. Identity + signed records travel encrypted over
-  `/canopee/pairing/1.0.0`.
-- **Sync** — keeping profile/contacts/devices in step across paired devices.
-  Last-writer-wins by the signed pointer's `published_at`. Runs manually
-  (`canopee sync`) and periodically (30s background task).
-
-### Storage
-
-- **Objects** — signed, content-addressed blobs. The object id is the hash
-  of its content. Immutable.
-- **Pointers** (`AppPointerRecord`) — signed mappings from `(owner, name)` to
-  an object id. Mutable (republishing overwrites). Stored on the DHT and in
-  a local cache (`~/.canopee/records/`).
-- **Records** — the three user records: `profile`, `contacts`, `devices`.
-  Each is a pointer + the object it points to.
-
-### Network
-
-- **mDNS** — LAN discovery. Disable with `CANOPEE_MDNS=0` to simulate
-  different networks.
-- **Kademlia DHT** — internet-wide discovery + record storage. Bootstrap
-  nodes seed the routing table.
-- **gossipsub** — pub/sub for real-time messaging (chat rooms, presence).
-- **Relay + DCUtR** — NAT traversal for nodes behind firewalls.
-
----
-
-## Environment variables
-
-These are read by `Config::new()` / `NetworkManager` and apply to the node,
-SDK, CLI, and Tauri app.
-
-| Variable | What it does | Default |
-|---|---|---|
-| `CANOPEE_APP_ROOT` | Replaces `~` as the base for `.canopee/` — full instance isolation (identity, storage, socket) | `~/.canopee` |
-| `CANOPEE_MDNS` | `0`/`false`/`no`/`off` disables mDNS (simulate different networks) | on |
-| `CANOPEE_BOOTSTRAP_ADDRS` | Comma-separated multiaddrs to dial at startup, replacing the defaults | public relay |
-| `CANOPEE_BOOTSTRAP_ADDRS_PREPEND` | `1` prepends env addrs to defaults instead of replacing | off |
-| `CANOPEE_IDENTITY_PASS` | Passphrase for at-rest identity encryption | none (plaintext) |
-| `CANOPEE_DEVICE_NAME` | Human-friendly device name announced to peers | hostname |
-
----
+Everything compiles as one Cargo workspace (resolver 3, 11 member crates,
+all listed in the root `Cargo.toml`).
 
 ## Testing
 
-### Unit/integration tests (per crate)
+Three tiers, cheapest to most realistic **(E2E must run single-threaded —
+see the note below)**:
 
 ```bash
-cargo test -p canopee-identity
+# 1. Unit tests
+cargo test --workspace
+
+# 2. Real-swarm integration (networking: dial + mDNS + request/response)
 cargo test -p canopee-network
-cargo test -p canopee-runtime
-# ... etc
+
+# 3. End-to-end: real nodes + real CLI + real DHT, isolated via CANOPEE_APP_ROOT
+cargo test -p canopee-e2e -- --test-threads=1
 ```
 
-These run in-process and are fast. Run them before committing.
-
-### End-to-end tests (real node processes)
-
-```bash
-# IMPORTANT: e2e tests must run serially
-cargo test -p canopee-e2e --test e2e -- --test-threads=1
-```
-
-E2E tests spawn real `canopee-node` processes (separate `$HOME`s) and drive
-them via the real `canopee` CLI over the real libp2p stack. They cover:
-sharing/unsharing, identity export/import, LAN pairing, manual sync, and
-periodic sync.
-
-**Why serial?** Parallel execution lets nodes from different tests
-cross-connect over mDNS/DHT and interfere nondeterministically. Serial is
-the supported mode.
-
-### Multi-instance testing (same machine)
-
-Run multiple isolated nodes side-by-side with `CANOPEE_APP_ROOT`:
-
-```bash
-# Two isolated instances
-CANOPEE_APP_ROOT=/tmp/alice ./target/debug/canopee-node &
-CANOPEE_APP_ROOT=/tmp/bob   ./target/debug/canopee-node &
-
-# Each CLI/GUI instance targets its own node
-CANOPEE_APP_ROOT=/tmp/alice ./target/debug/canopee-cli identity
-CANOPEE_APP_ROOT=/tmp/bob   ./target/debug/canopee-cli pair
-```
-
-### Simulating different networks
-
-Turn off mDNS and use a private bootstrap node:
-
-```bash
-# Bootstrap node (isolated from public DHT)
-CANOPEE_APP_ROOT=/tmp/bs CANOPEE_MDNS=0 CANOPEE_BOOTSTRAP_ADDRS= ./target/debug/canopee-node &
-
-# Peers point at the private bootstrap
-BS_ID=$(CANOPEE_APP_ROOT=/tmp/bs ./target/debug/canopee-cli device | head -n1)
-PORT=$(lsof -nP -iTCP -sTCP:LISTEN | awk -v pid=$(pgrep -f canopee-node | head -1) '$2==pid{split($9,a,":");print a[2];exit}')
-BS="/ip4/127.0.0.1/tcp/$PORT/p2p/$BS_ID"
-
-CANOPEE_APP_ROOT=/tmp/a CANOPEE_MDNS=0 CANOPEE_BOOTSTRAP_ADDRS="$BS" ./target/debug/canopee-node &
-CANOPEE_APP_ROOT=/tmp/b CANOPEE_MDNS=0 CANOPEE_BOOTSTRAP_ADDRS="$BS" ./target/debug/canopee-node &
-```
-
-Peers now discover each other purely over the DHT (no LAN shortcut) — the
-same path two machines on different networks use.
-
----
-
-## The Tauri app (`apps/canopee-home`)
-
-The GUI chat/home app. Connects to a running node over the Unix socket.
-
-```bash
-# Start a node
-CANOPEE_APP_ROOT=/tmp/alice ./target/debug/canopee-node &
-
-# Run the app (needs Node ≥ 20.12)
-CANOPEE_APP_ROOT=/tmp/alice PATH="/opt/homebrew/bin:$PATH" npm run tauri dev
-```
-
-Features: identity display, profile edit, QR pairing (show + scan), sync.
-Camera scanning is mobile-only; desktop uses a paste-payload fallback.
-
----
-
-## Multi-device identity roadmap
-
-The current work is tracked in [`.opencode/plans/multi-device.md`](.opencode/plans/multi-device.md).
-Status:
-
-- **Phase 1** (device key separation) — done.
-- **Phase 2** (identity export/import) — done.
-- **Phase 3** (LAN pairing: QR + typed code) — done.
-- **Phase 4** (sync protocol + periodic sync) — done.
-- **Phase 5** (Tauri QR UI + mobile) — UI done; mobile verification pending
-  (iOS simulator runtime download, Android SDK).
-
----
-
-## Common tasks
-
-### Add a CLI command
-
-1. Add the variant to `Commands` in `crates/canopee-cli/src/main.rs`.
-2. Add the match arm calling the SDK method.
-3. If the SDK method doesn't exist, add it to `crates/canopee-sdk/src/client.rs`.
-4. If the protocol command doesn't exist, add it to
-   `crates/canopee-protocol/src/lib.rs` (`NodeCommand` + `NodeResponse`) and
-   dispatch it in `crates/canopee-node/src/lib.rs`.
-
-### Add a user record type
-
-1. Define the struct in `crates/canopee-storage/src/user.rs` (with `version: u64`).
-2. Add a `RECORD_*` constant.
-3. Add `save_*`/`load_*` methods to `crates/canopee-runtime/src/lib.rs`.
-4. Add it to the sync list in `sync_records()` if it should sync.
-
-### Run the e2e suite before committing
+The full pre-release gate is:
 
 ```bash
 cargo build --workspace
-cargo test -p canopee-e2e --test e2e -- --test-threads=1
+cargo test --workspace -- --test-threads=1
 ```
 
+**Why `--test-threads=1` for e2e:** the e2e tests bind real ports/sockets and
+spawn real processes; parallel runners can collide. This is documented in the
+tests and enforced by running them serially.
+
+You can also run the same scenario as a plain shell script (good for CI
+without the cargo harness):
+
+```bash
+scripts/e2e.sh
+```
+
+What e2e actually proves (from `crates/canopee-e2e`): two nodes discover each
+other via mDNS; an object is private by default (fetch refused); after
+`share` it is discoverable as a provider and fetchable; after `unshare` the
+fetch is refused again.
+
 ---
 
-## Troubleshooting
+## Key concepts (5-minute tour)
 
-| Problem | Fix |
-|---|---|
-| `vite build` fails with `styleText` | Node.js too old — use `/opt/homebrew/bin/node` (v26) or `nvm use 20+` |
-| e2e tests fail in parallel | Run with `--test-threads=1` |
-| Node can't find peers | Check `CANOPEE_MDNS` isn't `0`; check bootstrap addrs |
-| `canopee-cli` can't connect | Is the node running? `canopee-cli start` or `cargo run -p canopee-node` |
-| iOS build fails | Download the simulator runtime: `xcodebuild -downloadPlatform iOS` |
-| `canopee pair` dial times out | Retry — a dial race was seen once; retry logic is a known follow-up |
+The full detail is in [docs/concepts](docs/concepts/README.md); here's the
+shape of it:
 
----
+1. **Identity = the person, device key = the machine.** A person's Ed25519
+   account key (`identity.key`) signs everything they publish and is reused
+   across devices. Each machine holds a distinct per-device key
+   (`device.key`) whose public key is its libp2p `PeerId` — so the same
+   identity can be online on several devices at once.
+2. **Objects are immutable and content-addressed; pointers are the mutable
+   layer.** `id = hash(type ‖ data)`. Records (`(owner, name) → object`)
+   — profile, contacts, home index, devices, username, capabilities — are
+   the "what's the latest for this name" lookups.
+3. **Nothing is shared by default.** `put` stores locally. `share` is the
+   explicit act: upsert a shared home entry, publish a pointer, announce a
+   DHT provider. `unshare` withdraws.
+4. **Records and registries live on the DHT**, signed so the swarm can't
+   forge them: provider records, `username:<name>`, `device:<peer-id>`,
+   and `(owner, name)` pointers.
+5. **Capabilities are signed grants** — `issuer → subject, permissions over
+   a resource` — verifiable offline, tracked in the `(owner, "capabilities")`
+   record, enforced by the runtime before serving a resource.
+6. **Serving is local.** The node speaks `canopee-protocol` on a Unix socket.
+   Browser access goes through the loopback-only, token-gated
+   `canopee gateway`.
 
-## Where to look next
+## Working conventions
 
-- [`docs/`](docs/) — tutorials (chat, apps, games, hosting, encryption).
-- [`.opencode/plans/multi-device.md`](.opencode/plans/multi-device.md) — the
-  multi-device identity spec + status.
-- Each crate's `README.md` — implementation details per crate.
+- Each crate has its own `README.md` with implementation-level detail; the
+  crate map and docs index link to all of them.
+- The runtime's internals are split across domain modules — `records.rs`,
+  `sharing.rs`, `capabilities.rs`, `pairing.rs`, `sync.rs` — each an `impl
+  Runtime` block over the single `struct Runtime` in `lib.rs`. Keep new
+  runtime operations in the module they belong to, and mark cross-module
+  private items `pub(crate)`.
+- The network manager is split between `src/manager.rs` and its
+  `src/manager/event_loop.rs` submodule (the swarm event loop). Free
+  functions there are `pub(super)`.
+- Wire message types used by both the node and clients live in
+  `canopee-protocol`; storage/user-data types live in `canopee-storage`;
+  the SDK (`canopee-sdk`) wraps node commands as async client methods.
+- CLI commands are per-domain files under `crates/canopee-cli/src/commands/`
+  (`identity.rs`, `sharing.rs`, `capabilities.rs`, `pairing.rs`, …).
+
+## Where to go next
+
+- [docs/guides/quickstart.md](docs/guides/quickstart.md) — get a node running
+  and your first objects stored.
+- [docs/guides/testing.md](docs/guides/testing.md) — the full testing
+  picture.
+- [docs/concepts/architecture.md](docs/concepts/architecture.md) — the crate
+  map and data flow in depth.
+- [docs/reference/cli.md](docs/reference/cli.md) — every `canopee` command.

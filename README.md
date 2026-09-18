@@ -1,103 +1,88 @@
 # Canopee
 
-Canopee is a decentralized peer-to-peer network of nodes. Each node owns a
-cryptographic identity, stores signed content-addressed objects locally, and
-can discover, connect to, and exchange data with other nodes over libp2p —
-directly, over the internet via relays and hole punching, or on the local
-network via mDNS.
+A decentralized peer-to-peer network of nodes. Each node owns a cryptographic
+identity, stores signed, content-addressed objects locally, and can discover,
+connect to, and exchange data with other nodes over libp2p — on the LAN via
+mDNS, or across the internet via the DHT, relays, and hole punching.
 
-The goal is a foundation apps can build on: any app can talk to the local
-node (through [`canopee-sdk`](crates/canopee-sdk)) to store data, discover
-and fetch objects from peers, and publish/subscribe to topics for real-time
-communication — without needing to run their own network stack.
+The goal is a foundation apps can build on: any app talks to the local node
+(through `canopee-sdk`, or by embedding `canopee-runtime` directly) to store
+data, discover and fetch objects from peers, and publish/subscribe to topics
+for real-time communication — without running its own network stack. **Nothing
+is shared by default**; every object is signed and content-verifiable by
+anyone.
 
-**New here?** Start with [`ONBOARDING.md`](ONBOARDING.md) — the practical
-guide to building, testing, and working in this repo.
+## Documentation
 
-New to P2P networking or NAT/relays/DHTs? Start with
-[`docs/networking-for-beginners.md`](docs/networking-for-beginners.md) — a
-no-prior-knowledge walkthrough of the concepts and how to set up and connect
-nodes. Wondering how this compares to IPFS, Iroh, or other P2P projects?
-See [`docs/comparison.md`](docs/comparison.md).
+- **New here?** Start with [`docs/README.md`](docs/README.md), or jump
+  straight to the [Quickstart](docs/guides/quickstart.md) to get a node up in
+  about five minutes.
+- **Understand the model:** [Concepts](docs/concepts/README.md) — identity,
+  objects & pointers, networking, sharing, capabilities, security.
+- **Do something hands-on:** [Guides](docs/guides/README.md) — sharing,
+  chat, multi-device, publishing apps, Tauri tutorials, and more.
+- **Check the exacts:** [Reference](docs/reference/README.md) — every CLI
+  command, environment variable, filesystem path, protocol, and SDK method.
+- **For contributors:** [`ONBOARDING.md`](ONBOARDING.md) walks through
+  building, testing, and working in this repo.
 
-**Tutorials**, roughly in the order you'd want them:
+## Quick start
 
-- [`docs/testing-chat-between-peers.md`](docs/testing-chat-between-peers.md) —
-  hands-on walkthrough of chatting between two peers, on the same LAN or
-  through a relay.
-- [`docs/app-manifests.md`](docs/app-manifests.md) — publishing, announcing,
-  resolving, fetching, and serving a static app/site peer-to-peer.
-- [`docs/canopee-uri-scheme.md`](docs/canopee-uri-scheme.md) — typing
-  `canopee://alice/portfolio` into a normal browser via the OS scheme handler.
-- [`docs/publishing-vs-building-apps.md`](docs/publishing-vs-building-apps.md) —
-  the difference between publishing static content via `app-manifest` and
-  building a real program on [`canopee-sdk`](crates/canopee-sdk); read this
-  if you're not sure which one you want.
-- [`docs/gateway-tutorial.md`](docs/gateway-tutorial.md) — driving a node
-  from a browser tab via `canopee gateway`, a loopback WebSocket bridge in
-  front of the node's Unix socket.
-- [`docs/tauri-presence-app-tutorial.md`](docs/tauri-presence-app-tutorial.md) —
-  the smallest real `canopee-sdk` app: a desktop "who's online" presence
-  indicator. Good starting point before the two below.
-- [`docs/tauri-chat-app-tutorial.md`](docs/tauri-chat-app-tutorial.md) — a
-  learn-by-doing guide to building a desktop chat app on `canopee-sdk`/
-  `canopee-runtime` with an embedded node, so installing the app is the
-  only setup step.
-- [`docs/tauri-multiplayer-game-tutorial.md`](docs/tauri-multiplayer-game-tutorial.md) —
-  a learn-by-doing guide to a desktop multiplayer game on the same
-  embedded-node foundation, covering lockstep move ordering and state
-  divergence detection on top of gossipsub's unordered, best-effort
-  delivery. Builds directly on the chat tutorial above.
-- [`docs/tauri-collab-editor-tutorial.md`](docs/tauri-collab-editor-tutorial.md) —
-  a learn-by-doing guide to a peer-to-peer collaborative document editor,
-  using a CRDT to merge concurrent edits automatically rather than
-  detecting and rejecting conflicts.
-- [`docs/spa-hosting-tutorial.md`](docs/spa-hosting-tutorial.md) — a
-  learn-by-doing guide to publishing a real React/Vite build (client-side
-  routing, MIME type coverage) rather than a hand-written page.
-- [`docs/p2p-app-caching-tutorial.md`](docs/p2p-app-caching-tutorial.md) — a
-  learn-by-doing guide to making published apps survive their original
-  publisher going offline (fetch-and-reannounce caching).
-- [`docs/bootstrap-nodes-tutorial.md`](docs/bootstrap-nodes-tutorial.md) — a
-  learn-by-doing guide to community/public bootstrap relay lists, so a
-  brand-new node can find its first peer without a human pasting a
-  multiaddr.
-- [`docs/multi-device-identity.md`](docs/multi-device-identity.md) — a
-  learn-by-doing guide to using the same identity from a laptop and a
-  phone: the built-in `canopee pair` LAN flow (per-device keys, device
-  list, record sync), the encrypted export/import fallback, and — honestly —
-  what a real (cross-signed, independently revocable) device-key design
-  would still need instead.
+```bash
+# Build everything
+cargo build --workspace
 
-**Reference and roadmap docs** — not tutorials, but useful context:
+# Initialize, start, and use a node
+canopee init
+canopee start
+canopee identity      # canopee://identity/<peer-id>
+canopee put ./file.txt
+canopee list
+canopee stop
+```
 
-- [`docs/app-ideas.md`](docs/app-ideas.md) — a longer list of possible
-  apps beyond what has a tutorial yet, sorted by how well-scoped each one
-  is.
-- [`docs/roadmap-hosting-replacement.md`](docs/roadmap-hosting-replacement.md) —
-  a gap analysis of what it would take for Canopee to genuinely replace a
-  commercial hosting provider, and which gaps are buildable vs. which are
-  structural tensions with being decentralized at all.
-- [`docs/security-considerations.md`](docs/security-considerations.md) — a
-  standing reference for what's handled (signed/content-addressed objects,
-  verified app pointers) and what isn't yet (message/content encryption,
-  key revocation, DHT/bootstrap trust, cache node accountability).
-- [`docs/end-to-end-encryption.md`](docs/end-to-end-encryption.md) — what
-  the X25519 key-agreement primitive in `canopee-identity` gives you, and
-  the much larger set of things (encryption, ratcheting, group keys,
-  key discovery) it deliberately doesn't — those remain app-layer work.
+Or build an app against it directly:
+
+```rust
+use canopee_sdk::CanopeeClient;
+
+let client = CanopeeClient::connect().await?;
+let id = client.put(b"hello canopee".to_vec()).await?;
+println!("stored as {id}");
+```
+
+## What it is
+
+- **One identity per person, one device key per machine.** A person's
+  Ed25519 account key signs everything they publish; each machine holds a
+  separate per-device key whose public key is the network `PeerId`. The same
+  identity can live on several devices at once ([Identity](docs/concepts/identity.md)).
+- **Objects and records.** Content-addressed, signed, immutable objects;
+  mutable pointers resolve `(owner, name)` to the latest object. Your profile,
+  contacts, home index, devices, username, and capabilities are all just
+  records ([Objects & pointers](docs/concepts/objects.md)).
+- **Nothing shared by default.** `put` stores locally; `share` is the explicit
+  "serve this to the network" act ([Sharing](docs/concepts/sharing.md)).
+  Capabilities layer signed, verifiable grants on top for who-may-do-what
+  ([Capabilities](docs/concepts/capabilities.md)).
+- **Static apps as first-class objects.** Publish a directory as a signed
+  manifest, announce it on the DHT, and any peer can open it in a browser
+  by name ([Publishing apps](docs/guides/publishing-apps.md)).
+- **Serving is a local, loopback affair.** The node speaks its protocol over
+  a Unix socket; browser access goes through a loopback WebSocket gateway
+  with a session token ([Gateway](docs/guides/gateway.md)).
 
 ## Workspace layout
 
-Canopee is a Cargo workspace. Each crate has its own README with full details;
-this is the map of how they fit together.
+Canopee is a Cargo workspace. Each crate has its own README with full
+details; this is the map of how they fit together.
 
 ```
                           ┌────────────────┐
                           │  canopee-cli   │  binary: `canopee`
                           │  canopee-node  │  binary: `canopee-node`
                           └───────┬────────┘
-                                  │ owns
+                                  │ owns / drives
                           ┌───────▼─────────┐
                           │ canopee-runtime │  ties identity + storage + network together
                           └───┬───────┬─────┘
@@ -110,72 +95,50 @@ this is the map of how they fit together.
           │ canopee-identity │◄───────────────────┘
           └──────────────────┘
 
-     canopee-protocol   wire format between node and clients (SDK/CLI)
-     canopee-config     shared filesystem paths (~/.canopee/...)
-     canopee-sdk        client library for apps — talks to the node over
-                         its Unix socket using canopee-protocol
+     canopee-protocol   wire format between the node and its clients
+     canopee-config     shared filesystem paths (~/.canopee/...) + env vars
+     canopee-sdk        client library for apps — talks to the node over its
+                        Unix socket using canopee-protocol
      canopee-gateway    local WebSocket bridge so a browser tab can drive
-                         the node through canopee-sdk
+                        the node through canopee-sdk
+     canopee-e2e        end-to-end tests spawning real node processes
 ```
 
-| Crate | What it is | README |
-|---|---|---|
-| [`canopee-identity`](crates/canopee-identity) | Ed25519 keypairs, signing, verification | [README](crates/canopee-identity/README.md) |
-| [`canopee-storage`](crates/canopee-storage) | Content-addressed, signed object store on disk | [README](crates/canopee-storage/README.md) |
-| [`canopee-network`](crates/canopee-network) | libp2p swarm: discovery, DHT, pub/sub, hole punching | [README](crates/canopee-network/README.md) |
-| [`canopee-config`](crates/canopee-config) | Shared `~/.canopee` filesystem layout | [README](crates/canopee-config/README.md) |
-| [`canopee-runtime`](crates/canopee-runtime) | Wires identity + storage + network into one node runtime | [README](crates/canopee-runtime/README.md) |
-| [`canopee-protocol`](crates/canopee-protocol) | Wire types shared between the node and its clients | [README](crates/canopee-protocol/README.md) |
-| [`canopee-node`](crates/canopee-node) | The node daemon — binary + library, serves the Unix socket | [README](crates/canopee-node/README.md) |
-| [`canopee-sdk`](crates/canopee-sdk) | Client library for apps: identity, storage, network | [README](crates/canopee-sdk/README.md) |
-| [`canopee-cli`](crates/canopee-cli) | `canopee` command-line tool | [README](crates/canopee-cli/README.md) |
-| [`canopee-gateway`](crates/canopee-gateway) | Loopback WebSocket bridge: browser JS → `canopee-sdk` → node | [README](crates/canopee-gateway/README.md) |
-
-## Quick start
-
-```bash
-# Build everything
-cargo build --workspace
-
-# Start a node in the background
-cargo run -p canopee-node &
-
-# Talk to it with the CLI
-cargo run -p canopee-cli -- identity
-cargo run -p canopee-cli -- put ./some-file.txt
-cargo run -p canopee-cli -- list
-cargo run -p canopee-cli -- status
-cargo run -p canopee-cli -- stop
-```
-
-Or build an app against it directly with [`canopee-sdk`](crates/canopee-sdk):
-
-```rust
-use canopee_sdk::CanopeeClient;
-
-let client = CanopeeClient::connect().await?;
-let id = client.put(b"hello canopee".to_vec()).await?;
-println!("stored as {id}");
-```
+| Crate | What it is |
+|---|---|
+| `canopee-identity` | Ed25519 account keypairs, X25519 DH keys, signing, verification, device keys, pairing crypto |
+| `canopee-storage` | Content-addressed, signed `Object` store on disk; user records; capabilities; DHT record model |
+| `canopee-network` | libp2p swarm: discovery (mDNS, Kademlia), DHT provider/record store, object exchange, pairing, gossipsub, relay/DCUtR/autonat |
+| `canopee-config` | `Config`: the `~/.canopee` layout (identity, storage, records, cache, exports, socket) + env-var overrides |
+| `canopee-runtime` | `Runtime`: ties identity + storage + network into one node runtime; implements every high-level operation |
+| `canopee-protocol` | The wire types (`NodeCommand` / `NodeResponse`, `PairingData`, `SyncResult`, …) shared between node and client |
+| `canopee-node` | The daemon: serves `canopee-protocol` over a Unix socket; also embeds a `Runtime` |
+| `canopee-sdk` | `CanopeeClient`: the client library apps use |
+| `canopee-cli` | `canopee`: the command-line tool built on `canopee-sdk` |
+| `canopee-gateway` | Loopback WebSocket bridge: browser JS ⇄ node |
+| `canopee-e2e` | End-to-end tests spawning real node processes against the real stack |
 
 ## Node state
 
 Everything a node owns lives under `~/.canopee/` (see
-[`canopee-config`](crates/canopee-config/README.md)):
+[Filesystem layout](docs/reference/filesystem.md)):
 
 ```
 ~/.canopee/
-├── identity/               # account key (the person) + device key (this machine)
-│   ├── identity.key        # Ed25519 account keypair (create once, reused across devices)
-│   └── device.key          # this machine's PeerId keypair (never shared)
-├── storage/                # signed objects, one file per object id
-├── exports/                # *.canopee export bundles
-├── state/node.state        # small metadata: identity, started flag, timestamps
-└── node.sock                # Unix socket the node listens on
+├── identity/          # account key (the person) + device key (this machine)
+├── storage/           # signed content-addressed objects
+├── records/           # local cache of resolved (owner, name) pointers
+├── aliases/           # friendly-name → owner map for canopee:// URIs
+├── state/             # node runtime state
+├── cache.cache        # LRU sidecar (evicts fetched content, never your own)
+├── exports/           # *.canopee export bundles
+├── node.sock          # the Unix socket the daemon speaks on
+└── uri-pending        # canopee:// URIs handled while no node was running
 ```
 
 ## Status
 
 This is an active work-in-progress reference implementation, not a hardened
-production system. See each crate's README for what's implemented and what's
-still a placeholder or a known limitation.
+production system. What's implemented, what's a known limitation, and what's
+deliberately left to the app layer are spelled out in
+[Security concept](docs/concepts/security.md) and [Roadmap](docs/reference/roadmap.md).

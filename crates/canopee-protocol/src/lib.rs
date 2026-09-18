@@ -1,7 +1,7 @@
 use canopee_identity::IdentityId;
 use canopee_storage::{
-    AppPointerRecord, ContactList, ExportBundle, HomeIndex, Object, ObjectId, ObjectInfo,
-    ObjectType, Profile,
+    AppPointerRecord, Capability, CapabilityId, CapabilityIndex, ContactList, ExportBundle,
+    HomeIndex, Object, ObjectId, ObjectInfo, ObjectType, Permission, Profile, Resource,
 };
 use serde::{Deserialize, Serialize};
 
@@ -273,6 +273,40 @@ pub enum NodeCommand {
     /// registered device, but the record refresh itself is identity-scoped
     /// (all devices share the same DHT keys), so it runs once.
     SyncDeviceList,
+    /// Issues a signed `Capability` on behalf of this node's identity,
+    /// granting `subject` `permissions` over `resource`, optionally expiring
+    /// at `expires_at` (unix seconds). Stores it and records it in the
+    /// issuer's `(owner, "capabilities")` index. The issued capability is
+    /// returned so the caller can pass it to the subject out of band.
+    GrantCapability {
+        subject: IdentityId,
+        resource: Resource,
+        permissions: Vec<Permission>,
+        expires_at: Option<u64>,
+    },
+    /// Lists the capability grants this node's identity has issued, via the
+    /// `(owner, "capabilities")` record (revocation state included).
+    ListCapabilities,
+    /// Marks one previously issued capability as revoked in the index and
+    /// republishes it. `null`/empty id optional for symmetry; the id is the
+    /// content-derived `Capability.id`.
+    RevokeCapability {
+        id: CapabilityId,
+    },
+    /// Verifies a presented capability end to end: signature + id + issuer
+    /// derivation, time window, and (when the issuer's index is reachable)
+    /// revocation state. The answer apps run before serving a resource.
+    CheckCapability {
+        capability: Capability,
+    },
+    /// The issuer-side authorization question: does `subject` currently hold
+    /// an unrevoked, unexpired grant from this node's identity of `permission`
+    /// on `resource`? The check run before serving a resource to a peer.
+    CheckAccess {
+        subject: IdentityId,
+        permission: Permission,
+        resource: Resource,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -391,4 +425,27 @@ pub enum NodeResponse {
     /// The response to `SyncFromPeer` / `SyncDeviceList`: which records were
     /// refreshed from the network.
     SyncComplete { result: SyncResult },
+    /// The response to `GrantCapability`: the newly issued grant.
+    CapabilityGranted {
+        capability: Capability,
+    },
+    /// The response to `ListCapabilities`: the issuer's full index (revocation
+    /// state included), or `None` when nothing has been issued yet.
+    Capabilities {
+        index: Option<CapabilityIndex>,
+    },
+    /// Confirms `RevokeCapability` marked the grant revoked and republished
+    /// the index.
+    CapabilityRevoked,
+    /// The response to `CheckCapability`: `valid` plus a human-readable
+    /// `reason` explaining an invalid verdict.
+    CapabilityCheck {
+        valid: bool,
+        reason: String,
+    },
+    /// The response to `CheckAccess`: whether the subject currently holds the
+    /// requested grant from this node's identity.
+    AccessAllowed {
+        allowed: bool,
+    },
 }

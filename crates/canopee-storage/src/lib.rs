@@ -1,4 +1,5 @@
 mod cache;
+mod capability;
 mod export_bundle;
 mod object;
 mod object_id;
@@ -7,6 +8,10 @@ mod storage;
 mod user;
 
 pub use cache::{Cache, CacheIndex};
+pub use capability::{
+    Capability, CapabilityEntry, CapabilityId, CapabilityIndex, ExportCapability, Permission,
+    RECORD_CAPABILITIES, Resource,
+};
 pub use export_bundle::ExportBundle;
 pub use crate::object::{
     AppManifest, Export, Object, ObjectInfo, ObjectMetadata, ObjectPayload, ObjectType, Verify,
