@@ -11,7 +11,7 @@ use super::common::{open_with_default_app, resolve_object_arg, serve_app_on_http
 
 pub(crate) async fn app_manifest(directory_path: String, name: String) {
     let client = CanopeeClient::connect().await.unwrap();
-    let (entrypoint, assets) = publish_directory(&client, Path::new(&directory_path))
+    let (entrypoint, assets) = publish_directory(&client, Path::new(&directory_path), false)
         .await
         .unwrap();
     let identity = client.identity().await.unwrap();

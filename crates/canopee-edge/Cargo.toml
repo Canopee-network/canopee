@@ -1,19 +1,21 @@
 [package]
-name = "canopee-node"
+name = "canopee-edge"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 anyhow = "1"
-bincode = "1"
-serde = { version = "1", features = ["derive"] }
+async-trait = "0.1"
+libp2p = { version = "0.54", features = ["cbor"] }
+rustls = "0.23"
+rustls-pemfile = "2"
 tokio = { version = "1", features = ["full"] }
+tokio-rustls = "0.26"
+tokio-util = { version = "0.7", features = ["io"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-canopee-edge = { path = "../canopee-edge" }
 canopee-network = { path = "../canopee-network" }
-canopee-identity = { path = "../canopee-identity" }
 canopee-storage = { path = "../canopee-storage" }
-canopee-runtime = { path = "../canopee-runtime" }
-canopee-protocol = { path = "../canopee-protocol" }
+
+[dev-dependencies]

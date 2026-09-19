@@ -25,6 +25,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Overall guard so a hung node can never hang the test suite forever.
@@ -44,15 +45,32 @@ struct TestNode {
 
 impl TestNode {
     fn spawn(node_bin: &Path, cli_bin: &Path, home: &Path) -> Self {
+        Self::spawn_with_env(node_bin, cli_bin, home, &[])
+    }
+
+    /// Spawns a node with extra environment variables. The embedded edge role
+    /// is disabled unless `CANOPEE_EDGE_HTTP_PORT` is passed explicitly, so
+    /// test nodes don't fight over the default HTTP port 8080.
+    fn spawn_with_env(
+        node_bin: &Path,
+        cli_bin: &Path,
+        home: &Path,
+        extra_env: &[(&str, String)],
+    ) -> Self {
         std::fs::create_dir_all(home).unwrap();
         let log = std::fs::File::create(home.join("node.log")).unwrap();
         let log_err = log.try_clone().unwrap();
-        let child = Command::new(node_bin)
-            .env("HOME", home)
+        let mut cmd = Command::new(node_bin);
+        cmd.env("HOME", home)
             .stdout(Stdio::from(log))
-            .stderr(Stdio::from(log_err))
-            .spawn()
-            .expect("failed to spawn canopee-node");
+            .stderr(Stdio::from(log_err));
+        if !extra_env.iter().any(|(k, _)| *k == "CANOPEE_EDGE_HTTP_PORT") {
+            cmd.env("CANOPEE_EDGE", "0");
+        }
+        for (k, v) in extra_env {
+            cmd.env(k, v);
+        }
+        let child = cmd.spawn().expect("failed to spawn canopee-node");
 
         let node = Self {
             home: home.to_path_buf(),
@@ -198,6 +216,240 @@ impl Drop for TestNode {
     }
 }
 
+/// Spawns `canopee publish <dir>` in the foreground (stdout piped for
+/// `wait_for_line`, stderr drained into a shared buffer so a failing
+/// publish's error is visible in panic messages instead of deadlocking the
+/// child on a full pipe).
+struct PublishProc {
+    child: Child,
+    stdout: std::sync::mpsc::Receiver<String>,
+    stderr: Arc<Mutex<String>>,
+}
+
+fn spawn_publish(cli: &Path, home: &Path, site: &Path, edge_addr: &str) -> PublishProc {
+    let mut child = Command::new(cli)
+        .args(["publish", site.to_str().unwrap()])
+        .env("HOME", home)
+        .env("CANOPEE_EDGE_ADDR", edge_addr)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn `canopee publish`");
+    let stdout = spawn_line_reader(child.stdout.take().unwrap());
+    let stderr: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    {
+        let stderr = stderr.clone();
+        let mut pipe = child.stderr.take().unwrap();
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = String::new();
+            let _ = pipe.read_to_string(&mut buf);
+            *stderr.lock().unwrap() = buf;
+        });
+    }
+    PublishProc {
+        child,
+        stdout,
+        stderr,
+    }
+}
+
+/// A running `canopee-edge` process: the public HTTP gateway publishers
+/// register with. Spawned with piped stdout so the test can parse its
+/// advertised listen address (`Edge listens on: ...`).
+struct EdgeProc {
+    #[allow(dead_code)]
+    home: PathBuf,
+    child: Child,
+    http_port: u16,
+    /// The edge's dialable multiaddr (`/ip4/127.0.0.1/tcp/<port>/p2p/<id>`).
+    addr: String,
+}
+
+impl EdgeProc {
+    fn spawn(edge_bin: &Path, home: &Path) -> Self {
+        std::fs::create_dir_all(home).unwrap();
+        let listen_port = free_port();
+        let http_port = free_port();
+        let log = std::fs::File::create(home.join("edge.log")).unwrap();
+        let mut child = Command::new(edge_bin)
+            .env("HOME", home)
+            .env("CANOPEE_EDGE_LISTEN_PORT", listen_port.to_string())
+            .env("CANOPEE_EDGE_HTTP_PORT", http_port.to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::from(log))
+            .spawn()
+            .expect("failed to spawn canopee-edge");
+        let rx = spawn_line_reader(child.stdout.take().unwrap());
+        let line = wait_for_line(&rx, "Edge listens on:", SOCKET_TIMEOUT, "edge startup");
+        let addr = line
+            .split("Edge listens on:")
+            .nth(1)
+            .expect("malformed `Edge listens on` line")
+            .trim()
+            .replace("/ip4/0.0.0.0/", "/ip4/127.0.0.1/");
+        Self {
+            home: home.to_path_buf(),
+            child,
+            http_port,
+            addr,
+        }
+    }
+}
+
+impl Drop for EdgeProc {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// A free TCP port on localhost (bind-0-then-release; small race, fine here).
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// Streams a child pipe's lines into a channel so the test can wait for
+/// specific output with a deadline.
+fn spawn_line_reader(out: impl std::io::Read + Send + 'static) -> std::sync::mpsc::Receiver<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        let reader = std::io::BufReader::new(out);
+        for line in reader.lines() {
+            match line {
+                Ok(line) => {
+                    if tx.send(line).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    rx
+}
+
+/// Waits for a line from the publish child's stdout containing `needle`.
+/// Unlike `wait_for_line`, also watches the child itself: a publish that
+/// dies early (its error goes to stderr) panics immediately with that stderr
+/// instead of timing out silently.
+fn wait_publish_line(proc: &mut PublishProc, needle: &str, timeout: Duration) -> String {
+    let deadline = Instant::now() + timeout;
+    let mut seen = String::new();
+    loop {
+        if let Ok(Some(status)) = proc.child.try_wait() {
+            let stderr = proc.stderr.lock().unwrap().clone();
+            panic!(
+                "`canopee publish` exited early ({status}) while waiting for `{needle}`; \
+                 stdout so far:\n{seen}\nstderr:\n{stderr}"
+            );
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "timed out waiting for `{needle}` in publish output; saw:\n{seen}\nstderr:\n{}",
+            proc.stderr.lock().unwrap()
+        );
+        match proc
+            .stdout
+            .recv_timeout(remaining.min(Duration::from_millis(200)))
+        {
+            Ok(line) => {
+                let found = line.contains(needle);
+                seen.push_str(&line);
+                seen.push('\n');
+                if found {
+                    return line;
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                let stderr = proc.stderr.lock().unwrap().clone();
+                panic!("publish stdout closed before `{needle}`; saw:\n{seen}\nstderr:\n{stderr}");
+            }
+        }
+    }
+}
+
+/// Waits for a line containing `needle`, panicking with everything seen so
+/// far on timeout.
+fn wait_for_line(
+    rx: &std::sync::mpsc::Receiver<String>,
+    needle: &str,
+    timeout: Duration,
+    what: &str,
+) -> String {
+    let deadline = Instant::now() + timeout;
+    let mut seen = String::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "timed out waiting for `{needle}` in {what}; saw:\n{seen}"
+        );
+        match rx.recv_timeout(remaining) {
+            Ok(line) => {
+                let found = line.contains(needle);
+                seen.push_str(&line);
+                seen.push('\n');
+                if found {
+                    return line;
+                }
+            }
+            Err(_) => panic!("timed out waiting for `{needle}` in {what}; saw:\n{seen}"),
+        }
+    }
+}
+
+/// Sends SIGINT to a process (what Ctrl+C sends to the publish CLI).
+fn sigint(pid: u32) {
+    let status = Command::new("kill")
+        .args(["-INT", &pid.to_string()])
+        .status()
+        .expect("failed to run kill");
+    assert!(status.success(), "kill -INT {pid} failed");
+}
+
+/// `curl` helpers hitting the edge's HTTP port with a specific Host header.
+fn curl_status(port: u16, host: &str, path: &str) -> String {
+    let out = Command::new("curl")
+        .args([
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "--max-time",
+            "20",
+            "-H",
+            &format!("Host: {host}"),
+            &format!("http://127.0.0.1:{port}{path}"),
+        ])
+        .output()
+        .expect("failed to run curl");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn curl_body(port: u16, host: &str, path: &str) -> String {
+    let out = Command::new("curl")
+        .args([
+            "-s",
+            "--max-time",
+            "20",
+            "-H",
+            &format!("Host: {host}"),
+            &format!("http://127.0.0.1:{port}{path}"),
+        ])
+        .output()
+        .expect("failed to run curl");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -206,20 +458,37 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Builds `canopee-node` and `canopee-cli` (idempotent — cargo's own
-/// fingerprint check makes this cheap on re-runs) and returns their binary
-/// paths. Note: the CLI binary is `canopee-cli`, not `canopee` — the latter
-/// is the workspace root's stub package.
+/// Builds the `canopee-node`, `canopee-cli`, and `canopee-edge` binaries
+/// (idempotent — cargo's own fingerprint check makes this cheap on re-runs)
+/// and returns the node + CLI binary paths. Note: the CLI binary is
+/// `canopee-cli`, not `canopee` — the latter is the workspace root's stub
+/// package.
 fn build_binaries() -> (PathBuf, PathBuf) {
     let root = workspace_root();
     let status = Command::new("cargo")
-        .args(["build", "-p", "canopee-node", "-p", "canopee-cli"])
+        .args([
+            "build",
+            "-p",
+            "canopee-node",
+            "-p",
+            "canopee-cli",
+            "-p",
+            "canopee-edge",
+        ])
         .current_dir(&root)
         .status()
         .expect("failed to invoke cargo build");
     assert!(status.success(), "cargo build of e2e binaries failed");
     let debug = root.join("target/debug");
     (debug.join("canopee-node"), debug.join("canopee-cli"))
+}
+
+fn edge_binary() -> PathBuf {
+    debug_dir().join("canopee-edge")
+}
+
+fn debug_dir() -> PathBuf {
+    workspace_root().join("target/debug")
 }
 
 #[test]
@@ -737,6 +1006,246 @@ fn two_nodes_sync_profile() {
 
     a.stop();
     b.stop();
+    let _ = std::fs::remove_dir_all(&base);
+
+    assert!(
+        started.elapsed() < SCENARIO_TIMEOUT,
+        "scenario exceeded its time budget"
+    );
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+/// End-to-end app publishing through an edge: one publisher node + one edge
+/// process on localhost, driven through the real `canopee publish` CLI and a
+/// real HTTP client (curl).
+///
+/// Scenario:
+///   1. A writes a static site directory (no username needed — apps are
+///      keyed by manifest hash).
+///   2. `canopee publish <dir>` runs in the foreground: it uploads the site,
+///      registers a signed serve claim with the edge, and reports the public
+///      URL. The edge validates ownership by fetching the manifest from the
+///      publisher and checking its owner.
+///   3. An HTTP request to the edge with `Host: <app-hash>.canopee.network`
+///      returns the site's index.html, tunneled live from A's node.
+///   4. An unregistered subdomain returns 404.
+///   5. Ctrl+C (SIGINT) deregisters: the same request then 404s.
+#[test]
+fn publish_app_over_edge_end_to_end() {
+    let started = Instant::now();
+    let (node_bin, cli_bin) = build_binaries();
+    let edge_bin = edge_binary();
+
+    let base = std::env::temp_dir().join(format!("canopee_e2e_publish_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let home_a = base.join("a");
+    let home_edge = base.join("edge");
+    let site = base.join("site");
+
+    std::fs::create_dir_all(&site).unwrap();
+    std::fs::write(
+        site.join("index.html"),
+        "<!doctype html><title>e2e</title><h1>hello from the edge</h1>\n",
+    )
+    .unwrap();
+
+    let mut a = TestNode::spawn(&node_bin, &cli_bin, &home_a);
+    let mut edge = EdgeProc::spawn(&edge_bin, &home_edge);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // 1. `canopee publish` is a foreground command: spawn it and wait for
+        //    the manifest id + public URL, which print only after the edge
+        //    accepted the serve registration.
+        let mut publish = spawn_publish(&cli_bin, &home_a, &site, &edge.addr);
+        let manifest_line = wait_publish_line(&mut publish, "Manifest:", DHT_TIMEOUT);
+        let manifest_id = manifest_line
+            .split("Manifest:")
+            .nth(1)
+            .expect("malformed Manifest line")
+            .trim()
+            .to_string();
+        let subdomain = &manifest_id[..32];
+        let host = format!("{subdomain}.canopee.network");
+        let url_line = wait_publish_line(&mut publish, "Public:", DHT_TIMEOUT);
+        assert!(
+            url_line.contains(&format!("https://{host}/")),
+            "unexpected public URL: {url_line}"
+        );
+
+        // 2. The app is live through the edge: GET / on the edge's HTTP port
+        //    with the app's subdomain returns the site's HTML.
+        let deadline = Instant::now() + DHT_TIMEOUT;
+        loop {
+            let body = curl_body(edge.http_port, &host, "/");
+            if body.contains("hello from the edge") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "edge never served the published app; last body: {body:?}"
+            );
+            std::thread::sleep(Duration::from_millis(500));
+        }
+
+        // 3. An unregistered subdomain is not served.
+        let status = curl_status(edge.http_port, &format!("{}.canopee.network", "0".repeat(32)), "/");
+        assert_eq!(status, "404", "unregistered subdomain must 404");
+
+        // 4. Ctrl+C deregisters: the CLI reports it, and the edge stops
+        //    routing the subdomain.
+        sigint(publish.child.id());
+        wait_publish_line(&mut publish, "Application taken offline.", Duration::from_secs(15));
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            match publish.child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                _ => {
+                    let _ = publish.child.kill();
+                    let _ = publish.child.wait();
+                    panic!("publish process did not exit after SIGINT");
+                }
+            }
+        }
+        let status = curl_status(edge.http_port, &host, "/");
+        assert_eq!(status, "404", "subdomain must 404 after deregistration");
+    }));
+
+    a.stop();
+    edge.child.kill().ok();
+    edge.child.wait().ok();
+    let _ = std::fs::remove_dir_all(&base);
+
+    assert!(
+        started.elapsed() < SCENARIO_TIMEOUT,
+        "scenario exceeded its time budget"
+    );
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+/// A plain `canopee-node` doubles as an edge (the default edge role), so
+/// `canopee publish` works against any node — this is how the public
+/// bootstrap relay serves publishers with no separate gateway process.
+///
+/// Scenario:
+///   1. Node E starts with the edge role on a fixed HTTP + libp2p port.
+///   2. Publisher A runs `canopee publish` pointed at E's libp2p address
+///      (as if E were the bootstrap relay) — no username, the app is keyed
+///      by manifest hash.
+///   3. An HTTP request to E with `Host: <app-hash>.canopee.network` returns
+///      the site's HTML, tunneled live from A.
+///   4. Ctrl+C deregisters and E 404s the subdomain again.
+#[test]
+fn publish_app_over_embedded_node_edge_end_to_end() {
+    let started = Instant::now();
+    let (node_bin, cli_bin) = build_binaries();
+
+    let base = std::env::temp_dir().join(format!("canopee_e2e_nodeedge_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let home_edge = base.join("edge");
+    let home_a = base.join("a");
+    let site = base.join("site");
+
+    std::fs::create_dir_all(&site).unwrap();
+    std::fs::write(
+        site.join("index.html"),
+        "<!doctype html><title>e2e</title><h1>hello from the node edge</h1>\n",
+    )
+    .unwrap();
+
+    // Node E: a normal node with the edge role enabled on known ports.
+    let edge_http_port = free_port();
+    let edge_libp2p_port = free_port();
+    let mut edge = TestNode::spawn_with_env(
+        &node_bin,
+        &cli_bin,
+        &home_edge,
+        &[
+            ("CANOPEE_EDGE_HTTP_PORT", edge_http_port.to_string()),
+            ("CANOPEE_LISTEN_PORT", edge_libp2p_port.to_string()),
+        ],
+    );
+    let edge_peer = edge.device_peer_id();
+    let edge_addr = format!("/ip4/127.0.0.1/tcp/{edge_libp2p_port}/p2p/{edge_peer}");
+
+    let mut a = TestNode::spawn(&node_bin, &cli_bin, &home_a);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut publish = Command::new(&cli_bin)
+            .args(["publish", site.to_str().unwrap()])
+            .env("HOME", &home_a)
+            .env("CANOPEE_EDGE_ADDR", &edge_addr)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn `canopee publish`");
+        let publish_rx = spawn_line_reader(publish.stdout.take().unwrap());
+        let manifest_line = wait_for_line(&publish_rx, "Manifest:", DHT_TIMEOUT, "publish output");
+        let manifest_id = manifest_line
+            .split("Manifest:")
+            .nth(1)
+            .expect("malformed Manifest line")
+            .trim()
+            .to_string();
+        let subdomain = &manifest_id[..32];
+        let host = format!("{subdomain}.canopee.network");
+        let url_line = wait_for_line(&publish_rx, "Public:", DHT_TIMEOUT, "publish output");
+        assert!(
+            url_line.contains(&format!("https://{host}/")),
+            "unexpected public URL: {url_line}"
+        );
+
+        // The app is live through the node edge.
+        let deadline = Instant::now() + DHT_TIMEOUT;
+        loop {
+            let body = curl_body(edge_http_port, &host, "/");
+            if body.contains("hello from the node edge") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "node edge never served the published app; last body: {body:?}"
+            );
+            std::thread::sleep(Duration::from_millis(500));
+        }
+
+        let status = curl_status(edge_http_port, &format!("{}.canopee.network", "0".repeat(32)), "/");
+        assert_eq!(status, "404", "unregistered subdomain must 404");
+
+        // Ctrl+C deregisters.
+        sigint(publish.id());
+        wait_for_line(
+            &publish_rx,
+            "Application taken offline.",
+            Duration::from_secs(15),
+            "publish shutdown",
+        );
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            match publish.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                _ => {
+                    let _ = publish.kill();
+                    let _ = publish.wait();
+                    panic!("publish process did not exit after SIGINT");
+                }
+            }
+        }
+        let status = curl_status(edge_http_port, &host, "/");
+        assert_eq!(status, "404", "subdomain must 404 after deregistration");
+    }));
+
+    a.stop();
+    edge.stop();
     let _ = std::fs::remove_dir_all(&base);
 
     assert!(

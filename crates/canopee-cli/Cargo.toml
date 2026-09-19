@@ -23,3 +23,4 @@ canopee-protocol = { path = "../canopee-protocol" }
 canopee-runtime = { path = "../canopee-runtime" }
 canopee-config = { path = "../canopee-config" }
 canopee-gateway = { path = "../canopee-gateway" }
+canopee-network = { path = "../canopee-network" }

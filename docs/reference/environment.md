@@ -50,6 +50,45 @@ private network.
 Multiaddrs to add **before** the defaults — bootstrap your own relay *and*
 keep the public one as a backstop.
 
+## `CANOPEE_EDGE_ADDR`
+
+The libp2p multiaddr of the edge your node publishes through, e.g.
+`/ip4/<edge-ip>/tcp/4002/p2p/<edge-peer-id>`. Optional: `canopee publish`
+defaults to the built-in public bootstrap relay, which runs the edge role
+like every node. Set this to publish through a different edge (e.g. your own
+domain's node). See
+[Publishing static apps](../guides/publishing-apps.md#serve-it-to-the-public-internet-through-an-edge).
+
+## `CANOPEE_PUBLIC_BASE_DOMAIN`
+
+The base domain the edge serves publishers under — a published app is
+reachable at `https://<app-manifest-hash>.<CANOPEE_PUBLIC_BASE_DOMAIN>/`.
+Default: `canopee.network`. Used by `canopee publish` to print the public
+URL; it must match the DNS zone the edge operator actually serves.
+
+## Edge role (every node)
+
+Every `canopee-node` doubles as a publishing edge unless disabled — this is
+how the public bootstrap relay serves publishers with no separate gateway:
+
+* `CANOPEE_EDGE` — set to `0`, `false`, `no`, or `off` to disable the edge
+  role. Default: **enabled**.
+* `CANOPEE_EDGE_HTTP_PORT` — public HTTP(S) port browsers connect to.
+  Default `8080`.
+* `CANOPEE_EDGE_TLS_CERT` / `CANOPEE_EDGE_TLS_KEY` — PEM certificate + key.
+  When both are set, the edge terminates TLS on the HTTP port; unset, it
+  serves plain HTTP (put a TLS terminator in front).
+
+## Standalone edge (`canopee-edge`) variables
+
+The dedicated edge binary runs the same role as its own process (see
+[Deploying an edge](deployment.md#deploying-an-edge)) and additionally
+reads:
+
+* `CANOPEE_EDGE_LISTEN_PORT` — libp2p TCP listen port. Default `4002`.
+* `CANOPEE_EDGE_ROOT` — directory holding the edge's persistent keypair (so
+  its peer id is stable across restarts). Default `~/.canopee-edge`.
+
 See also [`crates/canopee-config`]'s `Config` for the programmatic
 equivalents (`with_root`, `with_app_root`, `with_user_root`, `with_roots`,
 `with_mdns`).

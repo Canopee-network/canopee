@@ -73,6 +73,69 @@ requesters within the `cached_bytes` LRU — fetching *is* seeding (see
 replicates organically as peers fetch it; announcing makes the *first*
 fetch possible by advertising the publisher as a provider.
 
+## Serve it to the public internet through an edge
+
+Publishing makes an app *discoverable*; it does not by itself put it on the
+public web. For that, Canopee has **edges**: public-facing nodes that accept
+HTTP(S) requests for `https://<app-hash>.<domain>/` and tunnel them over
+libp2p to the publisher's node, which serves the bytes.
+
+You publish through an edge with a single foreground command — no username,
+no configuration:
+
+```bash
+canopee publish ./portfolio
+```
+
+By default this publishes through the public edge, which is just the
+bootstrap relay running its built-in edge role — every `canopee-node` is an
+edge unless started with `CANOPEE_EDGE=0`. To publish through a different
+edge (e.g. your own domain's), set `CANOPEE_EDGE_ADDR` to that node's libp2p
+multiaddr first.
+
+Output:
+
+```text
+Publishing "./portfolio" as portfolio
+  Manifest: 9f86d0844c2a2b52f0f6e5d4c3b2a19876543210abcdef0123456789abcd
+  ✓ Application published!
+  Public: https://9f86d0844c2a2b52f0f6e5d4c3b2a198.canopee.network/
+
+  Serving live from this node. Press Ctrl+C to take it offline.
+```
+
+The app is live at that URL for as long as the command runs. **Ctrl+C** sends
+a signed deregistration to the edge and takes the app offline.
+
+The URL is a **content hash**, not a name: it is derived from the app
+manifest (which embeds your identity and every file's hash). Two
+consequences:
+
+* **Nobody can take your address.** The edge validates a registration by
+  fetching the manifest from the registering peer and checking its owner is
+  the identity that signed the claim. There is no username registry to
+  squat on or hijack — the hash *is* the address.
+* **Republishing changed content gives a new URL** — the manifest hash
+  changes. Republishing byte-identical content reproduces the same URL.
+
+What happens under the hood:
+
+1. Every file is stored as an object and a signed
+   `app:<dirname>` → manifest pointer is published (the same thing
+   `canopee app-manifest` does, with progress suppressed).
+2. The node sends a signed **serve registration** for the manifest id to the
+   edge (`/canopee/serve-registry/1.0.0`). The edge fetches the manifest
+   from the registering peer, verifies it hashes to the claimed id and that
+   its `owner` is the signing identity, and only then pins the subdomain.
+3. While the session is up, the node re-registers every 30s (the edge drops
+   entries that miss 3 beats). Browser requests to
+   `https://<app-hash>.canopee.network/…` are routed by the edge's registry
+   to your node and answered over `/canopee/serve/1.0.0`.
+
+The public base domain defaults to `canopee.network`; override with
+`CANOPEE_PUBLIC_BASE_DOMAIN`. To run your own edge instead of using someone
+else's, see [Deploying an edge](../reference/deployment.md#deploying-an-edge).
+
 ## Published app vs. SDK app
 
 | | Published app (`app-manifest`) | SDK app (`canopee-sdk` / `Runtime`) |

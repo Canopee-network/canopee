@@ -104,20 +104,36 @@ enum Commands {
     },
     /// Lists the entries in your home index (name, object id, shared flag).
     Home,
-    Publish {
+    /// Publishes the given `<topic>: <message>` on the gossip layer (a
+    /// fire-and-forget broadcast — peers currently connected receive it once).
+    Pub {
         topic: String,
         message: String,
     },
     Chat {
         topic: String,
     },
-    //canopee-cli app-manifest ./portfolio --name alice-portfolio
+    /// Builds an app manifest from a directory and stores it under a name.
     AppManifest {
         directory_path: String,
         name: String,
     },
     AppInfo {
         id: String,
+    },
+    /// Publishes a local static website to the internet. Uploads every file in
+    /// `<directory>` as an immutable object, writes an app manifest pointer
+    /// under `app:<dirname>`, then starts a foreground serve session that
+    /// tunnels requests through a Canopee edge at
+    /// `https://<app-manifest-hash>.<domain>/`. Press Ctrl+C to stop serving.
+    ///
+    /// No username is needed: the address is a hash of the app manifest, so
+    /// only the owner can register it. Publishes through the built-in public
+    /// edge by default; set `CANOPEE_EDGE_ADDR` to another edge's libp2p
+    /// multiaddr to use your own.
+    Publish {
+        /// Path to the directory to publish (e.g. `./portfolio`).
+        directory: String,
     },
     /// Opens a stored object with the system's default app for it. Give a
     /// file name you stored with `put` (or a raw id): the bytes are written
@@ -339,7 +355,8 @@ async fn main() {
         Commands::Share { name, id } => commands::sharing::share(name, id, ids).await,
         Commands::Unshare { name } => commands::sharing::unshare(name).await,
         Commands::Home => commands::sharing::home(ids).await,
-        Commands::Publish { topic, message } => commands::network::publish(topic, message).await,
+        Commands::Pub { topic, message } => commands::network::publish(topic, message).await,
+        Commands::Publish { directory } => commands::publish::publish(directory).await,
         Commands::Chat { topic } => commands::network::chat(topic).await,
         Commands::AppManifest { directory_path, name } => {
             commands::apps::app_manifest(directory_path, name).await

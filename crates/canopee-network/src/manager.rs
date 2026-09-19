@@ -1,6 +1,10 @@
-use crate::behaviour::{CanopeeBehaviour, IDENTIFY_PROTOCOL, KAD_PROTOCOL, PAIRING_PROTOCOL};
+use crate::behaviour::{
+    CanopeeBehaviour, IDENTIFY_PROTOCOL, KAD_PROTOCOL, PAIRING_PROTOCOL, SERVE_PROTOCOL,
+    SERVE_REGISTRY_PROTOCOL,
+};
 use crate::message::{
     CanopeePairingRequest, CanopeePairingResponse, ObjectRequest, ObjectResponse, PubSubMessage,
+    ServeRegistration, ServeRegistrationResponse, ServeRequest, ServeResponse,
 };
 use crate::manager::event_loop::run_event_loop;
 use crate::peer::{Peer, RelayReservation};
@@ -35,8 +39,9 @@ fn relay_peer_id_from_circuit_addr(addr: &Multiaddr) -> Option<PeerId> {
 
 /// Default bootstrap relay addresses. New nodes dial these on startup to get
 /// their first Kademlia routing-table entries, after which normal DHT
-/// discovery takes over.
-const DEFAULT_BOOTSTRAP_ADDRS: &[&str] =
+/// discovery takes over. The default relay also runs the edge role, so this
+/// is the default edge for `canopee publish`.
+pub const DEFAULT_BOOTSTRAP_ADDRS: &[&str] =
     &["/ip4/89.127.234.35/tcp/4001/p2p/12D3KooWGiPk75fg8HBW7WJCouTTTLNi8W3s48sBK8AKewZKbCjC"];
 
 /// Returns the list of bootstrap multiaddrs to dial at startup.
@@ -130,6 +135,21 @@ enum Command {
         request: CanopeePairingRequest,
         reply: oneshot::Sender<anyhow::Result<String>>,
     },
+    /// Registers this node (plus the connection the edge dials back) as the
+    /// server for the signed `registration`'s username. The reply carries the
+    /// edge's acknowledgement or rejection.
+    SendServeRegistration {
+        edge_peer_id: PeerId,
+        registration: ServeRegistration,
+        reply: oneshot::Sender<anyhow::Result<ServeRegistrationResponse>>,
+    },
+    /// Forwards one HTTP request to `peer_id` (a publisher that registered
+    /// with us) and awaits its [`ServeResponse`].
+    SendServeRequest {
+        peer_id: PeerId,
+        request: ServeRequest,
+        reply: oneshot::Sender<anyhow::Result<ServeResponse>>,
+    },
     ListPeers(oneshot::Sender<Vec<Peer>>),
     /// Updates the tracked metadata (identity / username / display name) for
     /// a connected peer, resolved out-of-band (e.g. from the peer's signed
@@ -162,11 +182,33 @@ pub struct InboundPairing {
     pub reply: mpsc::UnboundedSender<CanopeePairingResponse>,
 }
 
+/// An inbound HTTP request from an edge, forwarded to the publisher's serve
+/// session (which subscribes via [`NetworkManager::serve_events`]). The
+/// publisher must answer with a [`ServeResponse`] on the unbounded `reply`;
+/// if the publisher's session produces no answer, a 500-style default is sent.
+#[derive(Clone)]
+pub struct InboundServe {
+    pub peer: PeerId,
+    pub request: ServeRequest,
+    pub reply: mpsc::UnboundedSender<ServeResponse>,
+}
+
+/// An inbound registration claim from a publisher, forwarded to the *edge*'s
+/// registry handler (which subscribes via [`NetworkManager::serve_registry_events`]).
+#[derive(Clone)]
+pub struct InboundServeRegistration {
+    pub peer: PeerId,
+    pub request: ServeRegistration,
+    pub reply: mpsc::UnboundedSender<ServeRegistrationResponse>,
+}
+
 #[derive(Clone)]
 pub struct NetworkManager {
     commands: mpsc::Sender<Command>,
     pubsub: broadcast::Sender<PubSubMessage>,
     pairing_events: broadcast::Sender<InboundPairing>,
+    serve_events: broadcast::Sender<InboundServe>,
+    serve_registry_events: broadcast::Sender<InboundServeRegistration>,
 }
 
 impl NetworkManager {
@@ -232,6 +274,22 @@ impl NetworkManager {
                         request_response::Config::default(),
                     );
 
+                let serve =
+                    request_response::cbor::Behaviour::<ServeRequest, ServeResponse>::new(
+                        [(StreamProtocol::new(SERVE_PROTOCOL), ProtocolSupport::Full)],
+                        request_response::Config::default(),
+                    );
+
+                let serve_registry = request_response::cbor::Behaviour::<
+                    ServeRegistration,
+                    ServeRegistrationResponse,
+                >::new(
+                    [(StreamProtocol::new(
+                        SERVE_REGISTRY_PROTOCOL,
+                    ), ProtocolSupport::Full)],
+                    request_response::Config::default(),
+                );
+
                 let ping = ping::Behaviour::new(ping::Config::default());
 
                 let mdns = if mdns {
@@ -260,6 +318,8 @@ impl NetworkManager {
                     kad,
                     object_exchange,
                     pairing,
+                    serve,
+                    serve_registry,
                     ping,
                     mdns,
                     gossipsub,
@@ -290,18 +350,24 @@ impl NetworkManager {
         let (tx, rx) = mpsc::channel(64);
         let (pubsub_tx, _) = broadcast::channel(256);
         let (pairing_tx, _) = broadcast::channel(64);
+        let (serve_tx, _) = broadcast::channel(64);
+        let (serve_registry_tx, _) = broadcast::channel(64);
         tokio::spawn(run_event_loop(
             swarm,
             rx,
             object_provider,
             pubsub_tx.clone(),
             pairing_tx.clone(),
+            serve_tx.clone(),
+            serve_registry_tx.clone(),
         ));
 
         Ok(Self {
             commands: tx,
             pubsub: pubsub_tx,
             pairing_events: pairing_tx,
+            serve_events: serve_tx,
+            serve_registry_events: serve_registry_tx,
         })
     }
 
@@ -367,6 +433,62 @@ impl NetworkManager {
             })
             .await?;
         rx.await?
+    }
+
+    /// Registers a signed username/connection claim with an edge. The edge
+    /// verifies the signature and reverses the username to the same identity
+    /// via the DHT, then pins the subdomain to *this* connection (the
+    /// connection the edge dialed to reach us) so it knows which peer to
+    /// forward `identity.domain` HTTP traffic to.
+    pub async fn send_serve_registration(
+        &self,
+        edge_peer_id: PeerId,
+        registration: ServeRegistration,
+    ) -> anyhow::Result<ServeRegistrationResponse> {
+        let (reply, rx) = oneshot::channel();
+        self.commands
+            .send(Command::SendServeRegistration {
+                edge_peer_id,
+                registration,
+                reply,
+            })
+            .await?;
+        rx.await?
+    }
+
+    /// Forwards a single HTTP request to `peer_id` and awaits the serving
+    /// publisher's [`ServeResponse`]. Only edges should call this (after a
+    /// successful registry lookup); a publisher answering `serve_events`
+    /// satisfies it.
+    pub async fn send_serve_request(
+        &self,
+        peer_id: PeerId,
+        request: ServeRequest,
+    ) -> anyhow::Result<ServeResponse> {
+        let (reply, rx) = oneshot::channel();
+        self.commands
+            .send(Command::SendServeRequest {
+                peer_id,
+                request,
+                reply,
+            })
+            .await?;
+        rx.await?
+    }
+
+    /// Returns a broadcast receiver for inbound HTTP requests forwarded by an
+    /// edge. Exactly one subscriber (the runtime's serve session) should
+    /// consume these; each `InboundServe` carries a reply channel that must be
+    /// answered with a [`ServeResponse`].
+    pub fn serve_events(&self) -> broadcast::Receiver<InboundServe> {
+        self.serve_events.subscribe()
+    }
+
+    /// Returns a broadcast receiver for inbound registration claims from
+    /// publishers. Exactly one subscriber (the edge's registry handler) should
+    /// consume these.
+    pub fn serve_registry_events(&self) -> broadcast::Receiver<InboundServeRegistration> {
+        self.serve_registry_events.subscribe()
     }
 
     /// Publishes an arbitrary, mutable DHT record under `key` (unlike

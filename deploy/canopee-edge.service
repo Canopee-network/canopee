@@ -1,0 +1,32 @@
+[Unit]
+Description=Canopee edge (public app gateway)
+After=network.target
+Wants=canopee-node.service
+
+[Service]
+Type=simple
+User=canopee
+Group=canopee
+Environment=CANOPEE_EDGE_LISTEN_PORT=4002
+Environment=CANOPEE_EDGE_HTTP_PORT=8080
+# Keep the listen port fixed and the root persistent so the edge's
+# /p2p/<peer-id> multiaddr is stable across restarts.
+Environment=CANOPEE_EDGE_ROOT=/home/canopee/.canopee-edge
+# ProtectSystem=strict makes /home read-only; the keypair dir must stay writable.
+ReadWritePaths=/home/canopee/.canopee-edge
+# Point at the same bootstrap relay your publishers use so the edge joins
+# the same DHT (it reverse-resolves usernames through it):
+#Environment=CANOPEE_BOOTSTRAP_ADDRS=/ip4/<relay-ip>/tcp/4001/p2p/<relay-peer-id>
+# Terminate TLS on the edge itself (wildcard cert for *.<base-domain>):
+#ReadWritePaths=/etc/canopee-edge
+#Environment=CANOPEE_EDGE_TLS_CERT=/etc/canopee-edge/fullchain.pem
+#Environment=CANOPEE_EDGE_TLS_KEY=/etc/canopee-edge/privkey.pem
+ExecStart=/home/canopee/canopee/target/release/canopee-edge
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target

@@ -1,7 +1,13 @@
 use crate::behaviour::{CanopeeBehaviour, CanopeeBehaviourEvent};
-use crate::message::{CanopeePairingResponse, ObjectRequest, ObjectResponse, PubSubMessage};
+use crate::message::{
+    CanopeePairingResponse, ObjectRequest, ObjectResponse, PubSubMessage, ServeRegistrationResponse,
+    ServeResponse,
+};
 use crate::peer::{Peer, RelayReservation};
-use super::{Command, InboundPairing, ObjectProvider, relay_peer_id_from_circuit_addr};
+use super::{
+    Command, InboundPairing, InboundServe, InboundServeRegistration, ObjectProvider,
+    relay_peer_id_from_circuit_addr,
+};
 use canopee_storage::ExportBundle;
 use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use libp2p::kad;
@@ -16,6 +22,14 @@ type PairingReplyFuture = BoxFuture<'static, (
     request_response::ResponseChannel<CanopeePairingResponse>,
     CanopeePairingResponse,
 )>;
+type ServeReplyFuture = BoxFuture<'static, (
+    request_response::ResponseChannel<ServeResponse>,
+    ServeResponse,
+)>;
+type ServeRegistryReplyFuture = BoxFuture<'static, (
+    request_response::ResponseChannel<ServeRegistrationResponse>,
+    ServeRegistrationResponse,
+)>;
 
 pub(super) async fn run_event_loop(
     mut swarm: libp2p::Swarm<CanopeeBehaviour>,
@@ -23,6 +37,8 @@ pub(super) async fn run_event_loop(
     object_provider: Arc<dyn ObjectProvider>,
     pubsub: broadcast::Sender<PubSubMessage>,
     pairing_events: broadcast::Sender<InboundPairing>,
+    serve_events: broadcast::Sender<InboundServe>,
+    serve_registry_events: broadcast::Sender<InboundServeRegistration>,
 ) {
     let mut peers: HashMap<PeerId, Peer> = HashMap::new();
     let mut listen_addrs: Vec<Multiaddr> = Vec::new();
@@ -43,7 +59,18 @@ pub(super) async fn run_event_loop(
         request_response::OutboundRequestId,
         oneshot::Sender<anyhow::Result<String>>,
     > = HashMap::new();
+    let mut pending_serve_registration: HashMap<
+        request_response::OutboundRequestId,
+        oneshot::Sender<anyhow::Result<ServeRegistrationResponse>>,
+    > = HashMap::new();
+    let mut pending_serve_request: HashMap<
+        request_response::OutboundRequestId,
+        oneshot::Sender<anyhow::Result<ServeResponse>>,
+    > = HashMap::new();
     let mut pairing_replies: FuturesUnordered<PairingReplyFuture> = FuturesUnordered::new();
+    let mut serve_replies: FuturesUnordered<ServeReplyFuture> = FuturesUnordered::new();
+    let mut serve_registry_replies: FuturesUnordered<ServeRegistryReplyFuture> =
+        FuturesUnordered::new();
     let mut kad_bootstrapped = false;
 
     loop {
@@ -63,7 +90,13 @@ pub(super) async fn run_event_loop(
                     &object_provider,
                     &pubsub,
                     &pairing_events,
+                    &serve_events,
+                    &serve_registry_events,
                     &mut pairing_replies,
+                    &mut serve_replies,
+                    &mut serve_registry_replies,
+                    &mut pending_serve_registration,
+                    &mut pending_serve_request,
                     &mut kad_bootstrapped,
                 ).await;
             }
@@ -77,6 +110,8 @@ pub(super) async fn run_event_loop(
                     &mut pending_get_record,
                     &mut pending_get_object,
                     &mut pending_pairing_request,
+                    &mut pending_serve_registration,
+                    &mut pending_serve_request,
                     &mut peers,
                     &listen_addrs,
                     &relay_reservations,
@@ -93,6 +128,34 @@ pub(super) async fn run_event_loop(
                     let _ = swarm
                         .behaviour_mut()
                         .pairing
+                        .send_response(channel, response);
+                }
+            }
+            serve_reply = async {
+                if serve_replies.is_empty() {
+                    std::future::pending().await
+                } else {
+                    serve_replies.next().await
+                }
+            } => {
+                if let Some((channel, response)) = serve_reply {
+                    let _ = swarm
+                        .behaviour_mut()
+                        .serve
+                        .send_response(channel, response);
+                }
+            }
+            serve_registry_reply = async {
+                if serve_registry_replies.is_empty() {
+                    std::future::pending().await
+                } else {
+                    serve_registry_replies.next().await
+                }
+            } => {
+                if let Some((channel, response)) = serve_registry_reply {
+                    let _ = swarm
+                        .behaviour_mut()
+                        .serve_registry
                         .send_response(channel, response);
                 }
             }
@@ -116,6 +179,14 @@ pub(super) fn handle_command(
     pending_pairing_request: &mut HashMap<
         request_response::OutboundRequestId,
         oneshot::Sender<anyhow::Result<String>>,
+    >,
+    pending_serve_registration: &mut HashMap<
+        request_response::OutboundRequestId,
+        oneshot::Sender<anyhow::Result<ServeRegistrationResponse>>,
+    >,
+    pending_serve_request: &mut HashMap<
+        request_response::OutboundRequestId,
+        oneshot::Sender<anyhow::Result<ServeResponse>>,
     >,
     peers: &mut HashMap<PeerId, Peer>,
     listen_addrs: &Vec<Multiaddr>,
@@ -195,6 +266,28 @@ pub(super) fn handle_command(
                 .send_request(&peer_id, request);
             pending_pairing_request.insert(request_id, reply);
         }
+        Command::SendServeRegistration {
+            edge_peer_id,
+            registration,
+            reply,
+        } => {
+            let request_id = swarm
+                .behaviour_mut()
+                .serve_registry
+                .send_request(&edge_peer_id, registration);
+            pending_serve_registration.insert(request_id, reply);
+        }
+        Command::SendServeRequest {
+            peer_id,
+            request,
+            reply,
+        } => {
+            let request_id = swarm
+                .behaviour_mut()
+                .serve
+                .send_request(&peer_id, request);
+            pending_serve_request.insert(request_id, reply);
+        }
         Command::ListPeers(reply) => {
             let _ = reply.send(peers.values().cloned().collect());
         }
@@ -269,7 +362,19 @@ pub(super) async fn handle_swarm_event(
     object_provider: &Arc<dyn ObjectProvider>,
     pubsub: &broadcast::Sender<PubSubMessage>,
     pairing_events: &broadcast::Sender<InboundPairing>,
+    serve_events: &broadcast::Sender<InboundServe>,
+    serve_registry_events: &broadcast::Sender<InboundServeRegistration>,
     pairing_replies: &mut FuturesUnordered<PairingReplyFuture>,
+    serve_replies: &mut FuturesUnordered<ServeReplyFuture>,
+    serve_registry_replies: &mut FuturesUnordered<ServeRegistryReplyFuture>,
+    pending_serve_registration: &mut HashMap<
+        request_response::OutboundRequestId,
+        oneshot::Sender<anyhow::Result<ServeRegistrationResponse>>,
+    >,
+    pending_serve_request: &mut HashMap<
+        request_response::OutboundRequestId,
+        oneshot::Sender<anyhow::Result<ServeResponse>>,
+    >,
     kad_bootstrapped: &mut bool,
 ) {
     match event {
@@ -576,6 +681,96 @@ pub(super) async fn handle_swarm_event(
         )) => {
             if let Some(reply) = pending_pairing_request.remove(&request_id) {
                 let _ = reply.send(Err(anyhow::anyhow!("Pairing request failed: {error}")));
+            }
+        }
+        SwarmEvent::Behaviour(CanopeeBehaviourEvent::Serve(
+            request_response::Event::Message { peer, message, .. },
+        )) => match message {
+            request_response::Message::Request {
+                request, channel, ..
+            } => {
+                let (reply_tx, mut reply_rx) = mpsc::unbounded_channel();
+                if serve_events
+                    .send(InboundServe {
+                        peer,
+                        request,
+                        reply: reply_tx,
+                    })
+                    .is_err()
+                {
+                    tracing::warn!("No serve session subscribed; ignoring inbound request");
+                }
+                serve_replies.push(Box::pin(async move {
+                    let response = reply_rx.recv().await.unwrap_or_else(|| ServeResponse {
+                        status: "500 Internal Server Error".into(),
+                        headers: Vec::new(),
+                        body: b"no serving node at this address".to_vec(),
+                    });
+                    (channel, response)
+                }));
+            }
+            request_response::Message::Response {
+                request_id,
+                response,
+            } => {
+                if let Some(reply) = pending_serve_request.remove(&request_id) {
+                    let _ = reply.send(Ok(response));
+                }
+            }
+        },
+        SwarmEvent::Behaviour(CanopeeBehaviourEvent::Serve(
+            request_response::Event::OutboundFailure {
+                request_id, error, ..
+            },
+        )) => {
+            if let Some(reply) = pending_serve_request.remove(&request_id) {
+                let _ = reply.send(Err(anyhow::anyhow!("Serve request failed: {error}")));
+            }
+        }
+        SwarmEvent::Behaviour(CanopeeBehaviourEvent::ServeRegistry(
+            request_response::Event::Message { peer, message, .. },
+        )) => match message {
+            request_response::Message::Request {
+                request, channel, ..
+            } => {
+                let (reply_tx, mut reply_rx) = mpsc::unbounded_channel();
+                if serve_registry_events
+                    .send(InboundServeRegistration {
+                        peer,
+                        request,
+                        reply: reply_tx,
+                    })
+                    .is_err()
+                {
+                    tracing::warn!("No registry handler subscribed; rejecting registration");
+                }
+                serve_registry_replies.push(Box::pin(async move {
+                    let response = reply_rx.recv().await.unwrap_or_else(|| {
+                        ServeRegistrationResponse::Error(
+                            "this node is not a Canopee edge".into(),
+                        )
+                    });
+                    (channel, response)
+                }));
+            }
+            request_response::Message::Response {
+                request_id,
+                response,
+            } => {
+                if let Some(reply) = pending_serve_registration.remove(&request_id) {
+                    let _ = reply.send(Ok(response));
+                }
+            }
+        },
+        SwarmEvent::Behaviour(CanopeeBehaviourEvent::ServeRegistry(
+            request_response::Event::OutboundFailure {
+                request_id, error, ..
+            },
+        )) => {
+            if let Some(reply) = pending_serve_registration.remove(&request_id) {
+                let _ = reply.send(Err(anyhow::anyhow!(
+                    "Serve registration request failed: {error}"
+                )));
             }
         }
         _ => {}

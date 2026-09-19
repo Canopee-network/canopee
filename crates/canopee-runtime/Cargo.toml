@@ -14,6 +14,7 @@ time = { version = "0.3", features = ["serde"] }
 async-trait = "0.1"
 tracing = "0.1"
 futures = "0.3"
+flate2 = "1"
 
 canopee-identity = { path = "../canopee-identity" }
 canopee-storage = { path = "../canopee-storage" }

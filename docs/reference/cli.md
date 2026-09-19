@@ -98,6 +98,7 @@ the [Capabilities reference](capabilities.md).
 | Command | What it does |
 |---|---|
 | `canopee app-manifest <dir> <name>` | Build an `ApplicationManifest` from a static directory + app name and publish it (pointer `(owner,"app:<name>")`). |
+| `canopee publish <dir>` | Publish a static site to the public web through an edge: uploads the directory (as `app-manifest` does, under `app:<dirname>`), then runs a foreground serve session so the site is live at `https://<app-manifest-hash>.<CANOPEE_PUBLIC_BASE_DOMAIN>/` until Ctrl+C. No username needed — the URL is a hash of the manifest, so only the owner can serve it; republishing changed content yields a new URL. Defaults to the built-in public edge (the bootstrap relay); `CANOPEE_EDGE_ADDR` overrides. |
 | `canopee app-info <id\|name>` | Show metadata about a published app manifest. |
 | `canopee open <id\|name>` `[--owner OWNER --name NAME]` | Open a stored object with the system's default app (bytes → temp file → OS opener), or open a *published app*: resolve the manifest (raw id, or `--owner`/`--name`), fetch it, serve it over local HTTP, launch the browser. |
 | `canopee handle <uri>` `[--port N]` | Resolve a `canopee://` URI (e.g. `canopee://alice/portfolio`) to an app and serve it in the default browser. Used by the OS scheme handler. |

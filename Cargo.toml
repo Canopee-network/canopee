@@ -2,6 +2,7 @@
 members = [
     "crates/canopee-cli",
     "crates/canopee-config",
+    "crates/canopee-edge",
     "crates/canopee-e2e",
     "crates/canopee-gateway",
     "crates/canopee-identity",

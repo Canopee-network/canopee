@@ -8,4 +8,5 @@ pub(crate) mod identity;
 pub(crate) mod network;
 pub(crate) mod objects;
 pub(crate) mod pairing;
+pub(crate) mod publish;
 pub(crate) mod sharing;

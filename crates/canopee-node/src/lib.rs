@@ -17,6 +17,42 @@ fn cache_cap_bytes() -> u64 {
     mb.saturating_mul(1024 * 1024)
 }
 
+/// Every node is also a publishing *edge* by default: it answers publisher
+/// registrations and proxies browser HTTP requests to them, so any node — in
+/// particular the public bootstrap relay — can serve `canopee publish` with
+/// no separate gateway to run. Set `CANOPEE_EDGE=0` (or `off`/`false`/`no`)
+/// to disable. `CANOPEE_EDGE_HTTP_PORT` (default `8080`) picks the public
+/// HTTP port; `CANOPEE_EDGE_TLS_CERT`/`CANOPEE_EDGE_TLS_KEY` make it HTTPS.
+/// A failure to start the edge role (e.g. the port is taken) is logged and
+/// otherwise ignored — the node's own duties are unaffected.
+async fn start_edge_role(network: canopee_network::NetworkManager) {
+    match std::env::var("CANOPEE_EDGE").as_deref() {
+        Ok("0") | Ok("false") | Ok("no") | Ok("off") => return,
+        _ => {}
+    }
+    let port: u16 = std::env::var("CANOPEE_EDGE_HTTP_PORT")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(8080);
+    let tls = match (
+        std::env::var("CANOPEE_EDGE_TLS_CERT"),
+        std::env::var("CANOPEE_EDGE_TLS_KEY"),
+    ) {
+        (Ok(cert), Ok(key)) => match canopee_edge::httpd::tls_server_config(&cert, &key) {
+            Ok(tls) => Some(tls),
+            Err(e) => {
+                eprintln!("edge TLS config failed ({e}); serving plain HTTP instead");
+                None
+            }
+        },
+        _ => None,
+    };
+    match canopee_edge::start_edge(network, port, tls).await {
+        Ok(bound) => println!("Canopee edge role serving HTTP on port {bound}"),
+        Err(e) => eprintln!("Canopee edge role unavailable: {e}"),
+    }
+}
+
 #[derive(Clone)]
 pub struct Node {
     runtime: Arc<Runtime>,
@@ -44,6 +80,7 @@ impl Node {
         }
         let listener = UnixListener::bind(&socket_path)?;
         println!("Canopee node listening on {:?}", socket_path);
+        start_edge_role(self.runtime.network.clone()).await;
         let mut shutdown = self.shutdown.subscribe();
         let mut tasks: JoinSet<()> = JoinSet::new();
         self.runtime.mark_started().await?;
@@ -735,6 +772,27 @@ impl Node {
                 Err(e) => NodeResponse::Error {
                     message: e.to_string(),
                 },
+            },
+
+            NodeCommand::StartServeSession { edge_addr, app_id } => match self
+                .runtime
+                .start_serve_session(&edge_addr, &app_id)
+                .await
+            {
+                Ok((session, app_id)) => {
+                    let base = std::env::var("CANOPEE_PUBLIC_BASE_DOMAIN")
+                        .unwrap_or_else(|_| "canopee.network".to_string());
+                    let root_url = session.root_url(&base);
+                    NodeResponse::ServeSessionStarted { app_id, root_url }
+                }
+                Err(e) => NodeResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+
+            NodeCommand::StopServeSession => {
+                self.runtime.stop_serve_session().await;
+                NodeResponse::ServeSessionStopped
             }
         }
     }

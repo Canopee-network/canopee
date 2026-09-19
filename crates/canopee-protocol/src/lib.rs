@@ -307,6 +307,18 @@ pub enum NodeCommand {
         permission: Permission,
         resource: Resource,
     },
+    /// Starts a publish/serve session for the app whose manifest is
+    /// `app_id`: signs a registration, dials the Canopee edge at `edge_addr`
+    /// (`/p2p/...` multiaddr) and pins `<app-hash>.<base>.domain` to this
+    /// connection where the edge forwards HTTP traffic. Foreground: the CLI
+    /// keeps the node running until `StopServeSession` (Ctrl+C) ends it.
+    StartServeSession {
+        edge_addr: String,
+        app_id: ObjectId,
+    },
+    /// Deregisters the current serve session with the edge and stops its
+    /// heartbeat. No-op when no session is running.
+    StopServeSession,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -448,4 +460,14 @@ pub enum NodeResponse {
     AccessAllowed {
         allowed: bool,
     },
+    /// The response to `StartServeSession`: the session is live and the edge
+    /// has pinned the app to this connection. `root_url` is the public root
+    /// (`https://<app-hash>.<base>/`) the app is served at.
+    ServeSessionStarted {
+        app_id: String,
+        root_url: String,
+    },
+    /// Confirms `StopServeSession` ended the previous session (or that none
+    /// was running).
+    ServeSessionStopped,
 }

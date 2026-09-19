@@ -370,6 +370,37 @@ impl CanopeeClient {
         }
     }
 
+    /// Starts a publish/serve session for the app whose manifest is
+    /// `app_id` with the Canopee edge at `edge_addr` (a `/p2p/...` multiaddr),
+    /// so the edge routes `<app-hash>.<base>/...` HTTP traffic to this node.
+    /// The session stays live until [`Self::stop_serve_session`] is called.
+    /// Returns the app id and the session's public root URL.
+    pub async fn start_serve_session(
+        &self,
+        edge_addr: &str,
+        app_id: &ObjectId,
+    ) -> anyhow::Result<(String, String)> {
+        match self
+            .request(NodeCommand::StartServeSession {
+                edge_addr: edge_addr.to_string(),
+                app_id: app_id.clone(),
+            })
+            .await?
+        {
+            NodeResponse::ServeSessionStarted { app_id, root_url } => Ok((app_id, root_url)),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Deregisters the node's current serve session with the edge and stops
+    /// its heartbeat. No-op when no session is running.
+    pub async fn stop_serve_session(&self) -> anyhow::Result<()> {
+        match self.request(NodeCommand::StopServeSession).await? {
+            NodeResponse::ServeSessionStopped => Ok(()),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
     /// This machine's device `PeerId` (from its per-device key) and human
     /// name.
     pub async fn device(&self) -> anyhow::Result<(String, String)> {

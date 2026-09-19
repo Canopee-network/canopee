@@ -35,9 +35,15 @@ pub fn open_browser(url: &str) {
     let _ = cmd.spawn();
 }
 
+/// Walks `directory` (skipping dot-entries), uploads every file as its own
+/// object, and returns the entrypoint (`/index.html`) alongside the map of
+/// `/path` → object id for the rest. With `quiet`, the per-file progress lines
+/// are suppressed (used by `canopee publish`, which prints a single success
+/// line instead).
 pub async fn publish_directory(
     client: &CanopeeClient,
     directory: &Path,
+    quiet: bool,
 ) -> anyhow::Result<(ObjectId, HashMap<String, ObjectId>)> {
     let mut assets = HashMap::new();
     let mut entrypoint = None;
@@ -52,11 +58,13 @@ pub async fn publish_directory(
             continue;
         }
         let path = entry.path();
-        let data = tokio::fs::read(path).await.unwrap();
+        let data = tokio::fs::read(path).await?;
         let relative = path.strip_prefix(directory)?.to_string_lossy().to_string();
         let object_id = client.put_file(&relative, data.clone()).await?;
 
-        println!("{} -> {}", relative, object_id);
+        if !quiet {
+            println!("{} -> {}", relative, object_id);
+        }
 
         if relative == "index.html" {
             entrypoint = Some(object_id.clone());

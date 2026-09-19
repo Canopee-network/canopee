@@ -1,6 +1,8 @@
 mod capabilities;
+mod http;
 mod pairing;
 mod records;
+mod serve;
 mod sharing;
 mod state;
 mod sync;
@@ -59,6 +61,9 @@ pub struct Runtime {
     /// the 12-char code + one-time session id minted by `initiate_pairing`,
     /// held only in memory until the inbound request arrives.
     pub(crate) pairing: Arc<RwLock<Option<OwnPairing>>>,
+    /// The active publish/serve session (if any), so the node can back a
+    /// `StopServeSession` request and replace an older session cleanly.
+    pub(crate) serve: Arc<RwLock<Option<Arc<serve::ServeSession>>>>,
 }
 
 #[derive(Clone)]
@@ -221,6 +226,7 @@ impl Runtime {
             state: Arc::new(RwLock::new(state)),
             shared,
             pairing: Arc::new(RwLock::new(None)),
+            serve: Arc::new(RwLock::new(None)),
         };
 
         if let Ok(Some(index)) = runtime.load_home_index().await {
