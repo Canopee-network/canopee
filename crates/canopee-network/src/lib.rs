@@ -4,7 +4,10 @@ pub mod message;
 pub mod peer;
 
 pub use libp2p::{Multiaddr, PeerId};
-pub use manager::{DEFAULT_BOOTSTRAP_ADDRS, InboundPairing, InboundServe, InboundServeRegistration, NetworkManager, ObjectProvider};
+pub use manager::{
+    InboundPairing, InboundServe, InboundServeRegistration, NetworkManager, ObjectProvider,
+    ObjectStore, DEFAULT_BOOTSTRAP_ADDRS,
+};
 pub use message::{
     app_subdomain, CanopeePairingRequest, CanopeePairingResponse, ObjectRequest, ObjectResponse,
     PubSubMessage, ServeRegistration, ServeRegistrationResponse, ServeRequest, ServeResponse,

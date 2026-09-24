@@ -1,8 +1,10 @@
 use crate::Runtime;
 use canopee_identity::Identity;
-use canopee_network::{CanopeePairingRequest, CanopeePairingResponse, InboundPairing, Multiaddr, PeerId};
+use canopee_network::{
+    CanopeePairingRequest, CanopeePairingResponse, InboundPairing, Multiaddr, PeerId,
+};
 use canopee_protocol::{PairingData, PairingPayload, PairingQrData, PairingRecord};
-use canopee_storage::{AppPointerRecord, RECORD_CONTACTS, RECORD_DEVICES, RECORD_PROFILE, Verify};
+use canopee_storage::{AppPointerRecord, Verify, RECORD_CONTACTS, RECORD_DEVICES, RECORD_PROFILE};
 use time::OffsetDateTime;
 
 impl Runtime {
@@ -50,11 +52,7 @@ impl Runtime {
 
     /// The counterpart to [`Self::initiate_pairing`], run on the device that
     /// already carries the identity (the source).
-    pub async fn complete_pairing(
-        &self,
-        qr: PairingQrData,
-        code: &str,
-    ) -> anyhow::Result<String> {
+    pub async fn complete_pairing(&self, qr: PairingQrData, code: &str) -> anyhow::Result<String> {
         if qr.version != 1 {
             anyhow::bail!("unsupported pairing protocol version {}", qr.version);
         }
@@ -141,10 +139,8 @@ impl Runtime {
             identity_key,
             records,
         };
-        let encrypted = canopee_identity::pairing::encrypt_payload(
-            &bincode::serialize(&data)?,
-            session_key,
-        )?;
+        let encrypted =
+            canopee_identity::pairing::encrypt_payload(&bincode::serialize(&data)?, session_key)?;
         Ok(PairingPayload { encrypted })
     }
 
@@ -234,7 +230,8 @@ impl Runtime {
                 && record.object.verify()
                 && record.object.payload.owner == *imported.id();
             if !valid {
-                let reason = "the transferred records do not verify against the transferred identity";
+                let reason =
+                    "the transferred records do not verify against the transferred identity";
                 tracing::warn!("pairing request rejected: {reason}");
                 return CanopeePairingResponse::Error(reason.into());
             }
@@ -276,17 +273,14 @@ impl Runtime {
         let identity_path = self.config.identity_path().join("identity.key");
         let exists = tokio::fs::try_exists(&identity_path).await.unwrap_or(false);
         if exists {
-            let backup = self
-                .config
-                .identity_path()
-                .join(format!(
-                    "identity.key.bak-{}",
-                    OffsetDateTime::now_utc().unix_timestamp()
-                ));
+            let backup = self.config.identity_path().join(format!(
+                "identity.key.bak-{}",
+                OffsetDateTime::now_utc().unix_timestamp()
+            ));
             tokio::fs::copy(&identity_path, &backup).await?;
         }
-        let passphrase: Option<String> = std::env::var_os("CANOPEE_IDENTITY_PASS")
-            .and_then(|p| p.into_string().ok());
+        let passphrase: Option<String> =
+            std::env::var_os("CANOPEE_IDENTITY_PASS").and_then(|p| p.into_string().ok());
         let bytes = match passphrase.as_deref() {
             Some(pass) => imported.export_encrypted(pass)?,
             None => imported.export_bytes()?,

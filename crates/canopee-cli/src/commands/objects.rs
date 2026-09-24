@@ -20,29 +20,74 @@ pub(crate) async fn put(path: String, ids: bool) {
         .unwrap();
 
     match response {
-        NodeResponse::ObjectCreated { id } => {
-            match name {
-                Some(name) => {
-                    if ids {
-                        println!("Stored {name}");
-                        println!("Id: {id}");
-                    } else {
-                        println!("Stored {name}");
-                    }
-                }
-                None => {
-                    if ids {
-                        println!("Stored object");
-                        println!("Id: {id}");
-                    } else {
-                        println!("Stored object");
-                    }
+        NodeResponse::ObjectCreated { id } => match name {
+            Some(name) => {
+                if ids {
+                    println!("Stored {name}");
+                    println!("Id: {id}");
+                } else {
+                    println!("Stored {name}");
                 }
             }
-        }
+            None => {
+                if ids {
+                    println!("Stored object");
+                    println!("Id: {id}");
+                } else {
+                    println!("Stored object");
+                }
+            }
+        },
 
         NodeResponse::Error { message } => {
             eprintln!("Error: {}", message);
+        }
+        _ => {}
+    }
+}
+
+pub(crate) async fn concat(ids: Vec<String>, name: Option<String>, ids_flag: bool) {
+    let client = CanopeeClient::connect().await.unwrap();
+    let mut object_ids: Vec<ObjectId> = Vec::with_capacity(ids.len());
+    for arg in &ids {
+        let (object_id, _resolved_name) = match resolve_object_arg(&client, arg).await {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        };
+        object_ids.push(object_id);
+    }
+
+    let node = NodeClient::new().await.unwrap();
+    let response = node
+        .request(NodeCommand::Concat {
+            ids: object_ids,
+            name,
+        })
+        .await
+        .unwrap();
+
+    match response {
+        NodeResponse::Concatenated { id } => {
+            if ids_flag {
+                println!("Concatenated");
+                println!("Id: {id}");
+            } else {
+                println!("Concatenated");
+            }
+            match client.get(id).await {
+                Ok(object) => println!(
+                    "Contents: {}",
+                    String::from_utf8_lossy(&object.payload.data)
+                ),
+                Err(e) => eprintln!("Error: {e}"),
+            }
+        }
+        NodeResponse::Error { message } => {
+            eprintln!("Error: {}", message);
+            std::process::exit(1);
         }
         _ => {}
     }
@@ -59,7 +104,9 @@ pub(crate) async fn get(id: String, output: Option<String>) {
     };
     match client.get(object_id).await {
         Ok(object) => {
-            let name = object_name(&client, &object.id.0).await.unwrap_or(resolved_name);
+            let name = object_name(&client, &object.id.0)
+                .await
+                .unwrap_or(resolved_name);
             match output {
                 Some(path) => {
                     tokio::fs::write(&path, &object.payload.data).await.unwrap();
@@ -96,7 +143,9 @@ pub(crate) async fn desc(id: String, ids: bool) {
         Ok(object) => {
             let data = &object.payload.data;
             let all_text = std::str::from_utf8(data).is_ok();
-            let name = object_name(&client, &object.id.0).await.unwrap_or(resolved_name);
+            let name = object_name(&client, &object.id.0)
+                .await
+                .unwrap_or(resolved_name);
             if ids {
                 println!("Id: {}", object.id);
             }
@@ -122,7 +171,13 @@ pub(crate) async fn desc(id: String, ids: bool) {
                 let printable: Vec<u8> = data
                     .iter()
                     .take(200)
-                    .map(|b| if b.is_ascii_graphic() || *b == b' ' { *b } else { b'.' })
+                    .map(|b| {
+                        if b.is_ascii_graphic() || *b == b' ' {
+                            *b
+                        } else {
+                            b'.'
+                        }
+                    })
                     .collect();
                 println!("{}", String::from_utf8_lossy(&printable));
             }

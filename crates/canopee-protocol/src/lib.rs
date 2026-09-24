@@ -115,6 +115,14 @@ pub enum NodeCommand {
         object_type: ObjectType,
         name: Option<String>,
     },
+    /// Concatenates the payloads of the given objects (each fetched and
+    /// signature-verified locally or from the network) into one new blob,
+    /// stores it, shares it, and actively replicates it into every connected
+    /// peer's store.
+    Concat {
+        ids: Vec<ObjectId>,
+        name: Option<String>,
+    },
     Get {
         id: ObjectId,
     },
@@ -190,29 +198,46 @@ pub enum NodeCommand {
         name: String,
     },
     /// Stores a new `Profile` version and repoints `(owner, "profile")`.
-    SaveProfile { profile: Profile },
+    SaveProfile {
+        profile: Profile,
+    },
     /// Loads the current `Profile` from the local shared store.
     LoadProfile,
     /// Stores a new `ContactList` version and repoints `(owner, "contacts")`.
-    SaveContactList { list: ContactList },
+    SaveContactList {
+        list: ContactList,
+    },
     /// Loads the current `ContactList` from the local shared store.
     LoadContactList,
     /// Stores a new `HomeIndex` version and repoints `(owner, "home")`.
-    SaveHomeIndex { index: HomeIndex },
+    SaveHomeIndex {
+        index: HomeIndex,
+    },
     /// Loads the current `HomeIndex` from the local shared store.
     LoadHomeIndex,
     /// Flips one home entry's `shared` flag (the explicit "share this on the
     /// network" / "stop sharing" action) and republishes the index.
-    SetHomeEntryShared { name: String, shared: bool },
+    SetHomeEntryShared {
+        name: String,
+        shared: bool,
+    },
     /// Shares a stored object under `name`: upserts a `shared: true` home
     /// entry and announces the object as a DHT provider.
-    ShareObject { name: String, object: ObjectId, app: Option<String> },
+    ShareObject {
+        name: String,
+        object: ObjectId,
+        app: Option<String>,
+    },
     /// Claims a globally unique username for this node's identity (publishes
     /// the signed `(owner, "username")` record + the DHT registry entry).
-    ClaimUsername { username: String },
+    ClaimUsername {
+        username: String,
+    },
     /// Reverse-resolves a friendly username to its canonical owner via the
     /// DHT registry (spoof-verified against the owner's signed record).
-    ResolveUsername { username: String },
+    ResolveUsername {
+        username: String,
+    },
     /// Returns the identity key as a transferable, encrypted envelope (see
     /// `Identity::export_encrypted`) — the "move my identity to another
     /// device" action. `passphrase` protects the exported bytes in transit.
@@ -240,7 +265,9 @@ pub enum NodeCommand {
     /// Resolves which device peer id to dial to reach `owner`, via its
     /// `(owner, "devices")` list. `None` when the owner has no registered,
     /// well-formed device.
-    ResolveOwnerDevice { owner: IdentityId },
+    ResolveOwnerDevice {
+        owner: IdentityId,
+    },
     /// Records another device against this node's `(owner, "devices")` list
     /// and republishes it. Used by pairing/bonding to admit a new machine.
     AddDevice {
@@ -249,7 +276,9 @@ pub enum NodeCommand {
     },
     /// Removes a device from this node's `(owner, "devices")` list and
     /// republishes it.
-    RemoveDevice { device_id: String },
+    RemoveDevice {
+        device_id: String,
+    },
     /// Starts a device-pairing session on THIS device (the new device): mints
     /// a fresh 12-char code + session id and returns the `PairingQrData` to
     /// show/print out of band. The node keeps the code in memory so it can
@@ -267,7 +296,9 @@ pub enum NodeCommand {
     /// the network, optionally dialing `peer_id` first to ensure the peer is
     /// reachable. Last-writer-wins: a newer signed pointer on the DHT
     /// replaces the local cache and its object is imported.
-    SyncFromPeer { peer_id: String },
+    SyncFromPeer {
+        peer_id: String,
+    },
     /// Refreshes this node's user records from every device in its
     /// `(owner, "devices")` list. Equivalent to `SyncFromPeer` for each
     /// registered device, but the record refresh itself is identity-scoped
@@ -324,6 +355,10 @@ pub enum NodeCommand {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum NodeResponse {
     ObjectCreated {
+        id: ObjectId,
+    },
+    /// The response to `Concat`: the id of the newly created concatenation.
+    Concatenated {
         id: ObjectId,
     },
     NameSet,
@@ -436,7 +471,9 @@ pub enum NodeResponse {
     },
     /// The response to `SyncFromPeer` / `SyncDeviceList`: which records were
     /// refreshed from the network.
-    SyncComplete { result: SyncResult },
+    SyncComplete {
+        result: SyncResult,
+    },
     /// The response to `GrantCapability`: the newly issued grant.
     CapabilityGranted {
         capability: Capability,

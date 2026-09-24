@@ -1,11 +1,10 @@
 use crate::message::{
-    CanopeePairingRequest, CanopeePairingResponse, ObjectRequest, ObjectResponse, ServeRequest,
-    ServeRegistration, ServeRegistrationResponse, ServeResponse,
+    CanopeePairingRequest, CanopeePairingResponse, ObjectRequest, ObjectResponse,
+    ServeRegistration, ServeRegistrationResponse, ServeRequest, ServeResponse,
 };
 use libp2p::{
     autonat, dcutr, gossipsub, identify, kad, mdns, ping, relay, request_response,
-    swarm::behaviour::toggle::Toggle,
-    swarm::NetworkBehaviour,
+    swarm::behaviour::toggle::Toggle, swarm::NetworkBehaviour,
 };
 
 pub const IDENTIFY_PROTOCOL: &str = "/canopee/id/1.0.0";

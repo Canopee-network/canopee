@@ -53,6 +53,19 @@ enum Commands {
     Put {
         path: String,
     },
+    /// Concatenates the payloads of two or more stored objects (by id or name)
+    /// into a single new object: the new object is stored, shared, and actively
+    /// replicated into connected peers' stores.
+    Concat {
+        /// The objects to concatenate, in order: a raw 64-char hex id, or a
+        /// name you stored the object under. At least one is required.
+        #[arg(required = true)]
+        ids: Vec<String>,
+        /// Give the concatenated object a name, so `canopee get <name>` and
+        /// sharing-by-name work without remembering its id.
+        #[arg(long)]
+        name: Option<String>,
+    },
     Export {
         id: String,
     },
@@ -258,15 +271,11 @@ enum Commands {
 enum UsernameCommand {
     /// Claims `<username>` for this node's identity so peers can discover it
     /// by name.
-    Claim {
-        username: String,
-    },
+    Claim { username: String },
     /// Shows the username currently claimed by this node's identity.
     Show,
     /// Reverse-resolves `<username>` to its canonical owner identity.
-    Lookup {
-        username: String,
-    },
+    Lookup { username: String },
 }
 
 #[derive(Subcommand)]
@@ -293,9 +302,7 @@ enum CapCommand {
     /// revocation state.
     List,
     /// Revokes a previously issued capability by its (content-derived) id.
-    Revoke {
-        id: String,
-    },
+    Revoke { id: String },
     /// Verifies a capability presented out of band. Pass a base64 `ExportCapability`
     /// bundle, or `--subject <identity>` to check whether the subject currently
     /// holds an unrevoked, unexpired grant of `<permission>` on `<resource>`
@@ -315,17 +322,12 @@ enum CapCommand {
 #[derive(Subcommand)]
 enum AliasCommand {
     /// Maps `<name>` to a canonical owner (`canopee://identity/<peer-id>`).
-    Set {
-        name: String,
-        owner: String,
-    },
+    Set { name: String, owner: String },
     /// Lists all known aliases.
     List,
     /// Removes `<name>`.
     #[command(alias = "rm")]
-    Remove {
-        name: String,
-    },
+    Remove { name: String },
 }
 
 #[tokio::main]
@@ -343,6 +345,10 @@ async fn main() {
         Commands::Get { id, output } => commands::objects::get(id, output).await,
         Commands::Desc { id } => commands::objects::desc(id, ids).await,
         Commands::Put { path } => commands::objects::put(path, ids).await,
+        Commands::Concat {
+            ids: concat_ids,
+            name,
+        } => commands::objects::concat(concat_ids, name, ids).await,
         Commands::Export { id } => commands::objects::export(id).await,
         Commands::Import { path } => commands::objects::import(path).await,
         Commands::Status => commands::daemon::status().await,
@@ -362,9 +368,10 @@ async fn main() {
         Commands::Pub { topic, message } => commands::network::publish(topic, message).await,
         Commands::Publish { directory } => commands::publish::publish(directory).await,
         Commands::Chat { topic } => commands::network::chat(topic).await,
-        Commands::AppManifest { directory_path, name } => {
-            commands::apps::app_manifest(directory_path, name).await
-        }
+        Commands::AppManifest {
+            directory_path,
+            name,
+        } => commands::apps::app_manifest(directory_path, name).await,
         Commands::AppInfo { id } => commands::apps::app_info(id).await,
         Commands::Open {
             id,

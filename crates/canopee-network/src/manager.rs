@@ -2,23 +2,23 @@ use crate::behaviour::{
     CanopeeBehaviour, IDENTIFY_PROTOCOL, KAD_PROTOCOL, PAIRING_PROTOCOL, SERVE_PROTOCOL,
     SERVE_REGISTRY_PROTOCOL,
 };
+use crate::manager::event_loop::run_event_loop;
 use crate::message::{
     CanopeePairingRequest, CanopeePairingResponse, ObjectRequest, ObjectResponse, PubSubMessage,
     ServeRegistration, ServeRegistrationResponse, ServeRequest, ServeResponse,
 };
-use crate::manager::event_loop::run_event_loop;
 use crate::peer::{Peer, RelayReservation};
 use canopee_identity::IdentityId;
 use canopee_storage::{ExportBundle, ObjectId};
 
+use libp2p::identity::Keypair;
 use libp2p::kad::{self, store::MemoryStore};
 use libp2p::multiaddr::Protocol;
 use libp2p::request_response::{self, ProtocolSupport};
 use libp2p::{
-    Multiaddr, PeerId, StreamProtocol, SwarmBuilder, autonat, dcutr, gossipsub, identify, mdns,
-    noise, ping, relay, tcp, yamux,
+    autonat, dcutr, gossipsub, identify, mdns, noise, ping, relay, tcp, yamux, Multiaddr, PeerId,
+    StreamProtocol, SwarmBuilder,
 };
-use libp2p::identity::Keypair;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -117,6 +117,26 @@ pub trait ObjectProvider: Send + Sync + 'static {
     async fn get_object(&self, id: &ObjectId) -> Option<ExportBundle>;
 }
 
+/// The write side of the object-exchange protocol: where a peer's *pushed*
+/// (`ObjectRequest::Store`) bundles land. On this node this is the same
+/// storage backing the `ObjectProvider`'s reads — `put_verified` re-verifies
+/// the sender's signature as part of persisting, so an invalid push is
+/// rejected at the storage engine rather than trusted on arrival.
+#[async_trait::async_trait]
+pub trait ObjectStore: Send + Sync + 'static {
+    async fn put_verified(&self, object: &canopee_storage::Object) -> anyhow::Result<()>;
+}
+
+/// The canonical `ObjectStore`: the content-addressed disk store itself.
+/// Network tests (and embedded relabelings) point an `Arc<Storage>` at the
+/// store slot of a manager.
+#[async_trait::async_trait]
+impl ObjectStore for canopee_storage::Storage {
+    async fn put_verified(&self, object: &canopee_storage::Object) -> anyhow::Result<()> {
+        canopee_storage::Storage::put_verified(self, object).await
+    }
+}
+
 enum Command {
     Dial(Multiaddr),
     ListenViaRelay(Multiaddr),
@@ -139,6 +159,15 @@ enum Command {
         peer_id: PeerId,
         object_id: ObjectId,
         reply: oneshot::Sender<anyhow::Result<ExportBundle>>,
+    },
+    /// Actively replicates `bundle` to `peer_id` (or, when `None`, to every
+    /// connected peer): each target receives `ObjectRequest::Store` and must
+    /// answer `Stored` for the push to count. The reply resolves when all
+    /// targets have answered (or timed out / failed).
+    ReplicateObject {
+        peer_id: Option<PeerId>,
+        bundle: ExportBundle,
+        reply: oneshot::Sender<anyhow::Result<()>>,
     },
     /// Sends a LAN pairing request to `peer_id` over `/canopee/pairing/1.0.0`
     /// and awaits the response.
@@ -238,10 +267,16 @@ impl NetworkManager {
     /// embedded apps that share one identity with other apps should pass
     /// `false` so a second app's swarm never re-announces the same `PeerId`
     /// over mDNS (they still find each other via Kademlia/bootstrap + dialing).
+    ///
+    /// `object_store` is where *pushed* objects ([`ObjectRequest::Store`])
+    /// land — normally the same storage that backs `object_provider`. Gate
+    /// store-persistence the same way the rest of object storage is gated:
+    /// anything accepted by `put_verified` is signature-verified first.
     pub fn new(
         device_key: Keypair,
         listen_addr: Multiaddr,
         object_provider: Arc<dyn ObjectProvider>,
+        object_store: Arc<dyn ObjectStore>,
         mdns: bool,
     ) -> anyhow::Result<Self> {
         // create peer_id from the device key...
@@ -280,25 +315,27 @@ impl NetworkManager {
                         request_response::Config::default(),
                     );
 
-                let pairing =
-                    request_response::cbor::Behaviour::<CanopeePairingRequest, CanopeePairingResponse>::new(
-                        [(StreamProtocol::new(PAIRING_PROTOCOL), ProtocolSupport::Full)],
-                        request_response::Config::default(),
-                    );
+                let pairing = request_response::cbor::Behaviour::<
+                    CanopeePairingRequest,
+                    CanopeePairingResponse,
+                >::new(
+                    [(StreamProtocol::new(PAIRING_PROTOCOL), ProtocolSupport::Full)],
+                    request_response::Config::default(),
+                );
 
-                let serve =
-                    request_response::cbor::Behaviour::<ServeRequest, ServeResponse>::new(
-                        [(StreamProtocol::new(SERVE_PROTOCOL), ProtocolSupport::Full)],
-                        request_response::Config::default(),
-                    );
+                let serve = request_response::cbor::Behaviour::<ServeRequest, ServeResponse>::new(
+                    [(StreamProtocol::new(SERVE_PROTOCOL), ProtocolSupport::Full)],
+                    request_response::Config::default(),
+                );
 
                 let serve_registry = request_response::cbor::Behaviour::<
                     ServeRegistration,
                     ServeRegistrationResponse,
                 >::new(
-                    [(StreamProtocol::new(
-                        SERVE_REGISTRY_PROTOCOL,
-                    ), ProtocolSupport::Full)],
+                    [(
+                        StreamProtocol::new(SERVE_REGISTRY_PROTOCOL),
+                        ProtocolSupport::Full,
+                    )],
                     request_response::Config::default(),
                 );
 
@@ -382,6 +419,7 @@ impl NetworkManager {
             swarm,
             rx,
             object_provider,
+            object_store,
             pubsub_tx.clone(),
             pairing_tx.clone(),
             serve_tx.clone(),
@@ -556,6 +594,36 @@ impl NetworkManager {
         rx.await?
     }
 
+    /// Actively replicates `bundle` — the push path that lands a freshly
+    /// created object in already-connected peers' stores (the pull-only DHT
+    /// path in [`Self::get_object`] covers everything else).
+    ///
+    /// `to` targets one specific peer; `None` broadcasts to every connected
+    /// peer. Each target verifies the bundle's signature on receipt
+    /// (`put_verified`) and answers `Stored` or `StoreFailed`.
+    ///
+    /// Aggregation: with `to: None` this is best-effort — if at least one
+    /// target stored the bundle, it resolves `Ok(())` (individual refusals
+    /// are logged as warnings, since a connected bootstrap relay, for
+    /// instance, may hold no store); it errors only when *every* target
+    /// failed. With an explicit `to`, the result is strict: it resolves only
+    /// if that peer stored the bundle.
+    pub async fn replicate_object(
+        &self,
+        bundle: ExportBundle,
+        to: Option<PeerId>,
+    ) -> anyhow::Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.commands
+            .send(Command::ReplicateObject {
+                peer_id: to,
+                bundle,
+                reply,
+            })
+            .await?;
+        rx.await?
+    }
+
     pub async fn peers(&self) -> anyhow::Result<Vec<Peer>> {
         let (reply, rx) = oneshot::channel();
         self.commands.send(Command::ListPeers(reply)).await?;
@@ -671,11 +739,7 @@ mod tests {
     }
 
     /// Sets an env var for the duration of the closure, restoring it after.
-    fn with_env<K: AsRef<str>, V: AsRef<str>>(
-        key: K,
-        value: Option<V>,
-        f: impl FnOnce(),
-    ) {
+    fn with_env<K: AsRef<str>, V: AsRef<str>>(key: K, value: Option<V>, f: impl FnOnce()) {
         let key = key.as_ref();
         let prev = std::env::var_os(key);
         match value {
@@ -698,26 +762,73 @@ mod tests {
     }
 
     fn addrs() -> Vec<String> {
-        bootstrap_addrs().into_iter().map(|a| a.to_string()).collect()
+        bootstrap_addrs()
+            .into_iter()
+            .map(|a| a.to_string())
+            .collect()
     }
 
     #[test]
     fn defaults_used_when_no_env_override() {
         let _guard = LOCK.lock().unwrap();
         clear_bootstrap_env();
-        assert!(!addrs().is_empty(), "default bootstrap list must not be empty");
-        assert_eq!(addrs()[0].parse::<Multiaddr>().unwrap().to_string(), addrs()[0]);
+        assert!(
+            !addrs().is_empty(),
+            "default bootstrap list must not be empty"
+        );
+        assert_eq!(
+            addrs()[0].parse::<Multiaddr>().unwrap().to_string(),
+            addrs()[0]
+        );
+    }
+
+    #[test]
+    fn every_default_bootstrap_addr_is_relay_p2p_circuit_capable() {
+        let _guard = LOCK.lock().unwrap();
+        clear_bootstrap_env();
+        // Relay/bootstrap parity (Phase-1 milestone): every node bootstraps
+        // off the same `DEFAULT_BOOTSTRAP_ADDRS` const, and every entry names
+        // a relay peer (`.with(Protocol::P2pCircuit)` is what both the
+        // bootstrap dial-off and the auto-relay listen path build on). If a
+        // default address stops naming a relay, auto_relay's circuit
+        // reservations silently become no-ops — this test pins that.
+        for addr in DEFAULT_BOOTSTRAP_ADDRS {
+            let parsed: Multiaddr = addr.parse().expect("default bootstrap addr parses");
+            let has_relay_peer = parsed.iter().any(|p| matches!(p, Protocol::P2p(_)));
+            assert!(
+                has_relay_peer,
+                "default bootstrap address {addr} must name a relay peer id"
+            );
+        }
+        let default_addrs: Vec<Multiaddr> = DEFAULT_BOOTSTRAP_ADDRS
+            .iter()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        assert!(
+            !default_addrs.is_empty(),
+            "DEFAULT_BOOTSTRAP_ADDRS must contain at least one relay"
+        );
     }
 
     #[test]
     fn env_override_replaces_defaults() {
         let _guard = LOCK.lock().unwrap();
         clear_bootstrap_env();
-        with_env("CANOPEE_BOOTSTRAP_ADDRS", Some("/ip4/127.0.0.1/tcp/9999/p2p/12D3KooWGiPk75fg8HBW7WJCouTTTLNi8W3s48sBK8AKewZKbCjC"), || {
-            let addrs = addrs();
-            assert_eq!(addrs.len(), 1, "override must replace the defaults entirely");
-            assert!(addrs[0].starts_with("/ip4/127.0.0.1/tcp/9999"));
-        });
+        with_env(
+            "CANOPEE_BOOTSTRAP_ADDRS",
+            Some(
+                "/ip4/127.0.0.1/tcp/9999/p2p/12D3KooWGiPk75fg8HBW7WJCouTTTLNi8W3s48sBK8AKewZKbCjC",
+            ),
+            || {
+                let addrs = addrs();
+                assert_eq!(
+                    addrs.len(),
+                    1,
+                    "override must replace the defaults entirely"
+                );
+                assert!(addrs[0].starts_with("/ip4/127.0.0.1/tcp/9999"));
+            },
+        );
     }
 
     #[test]
@@ -726,7 +837,9 @@ mod tests {
         clear_bootstrap_env();
         with_env(
             "CANOPEE_BOOTSTRAP_ADDRS",
-            Some("/ip4/127.0.0.1/tcp/9999/p2p/12D3KooWGiPk75fg8HBW7WJCouTTTLNi8W3s48sBK8AKewZKbCjC"),
+            Some(
+                "/ip4/127.0.0.1/tcp/9999/p2p/12D3KooWGiPk75fg8HBW7WJCouTTTLNi8W3s48sBK8AKewZKbCjC",
+            ),
             || {
                 with_env("CANOPEE_BOOTSTRAP_ADDRS_PREPEND", Some("1"), || {
                     let addrs = addrs();
@@ -779,9 +892,11 @@ mod tests {
         clear_bootstrap_env();
         for value in ["0", "false", "no", "off"] {
             with_env("CANOPEE_AUTO_RELAY", Some(value), || {
-                assert!(!auto_relay(), "CANOPEE_AUTO_RELAY={value} must disable auto relay");
+                assert!(
+                    !auto_relay(),
+                    "CANOPEE_AUTO_RELAY={value} must disable auto relay"
+                );
             });
         }
     }
 }
-

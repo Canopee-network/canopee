@@ -1,5 +1,5 @@
-use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use canopee_sdk::CanopeeClient;
 
 use super::common::short_peer_id;
@@ -15,7 +15,11 @@ pub(crate) async fn pair(qr: Option<String>, code: Option<String>) {
                 println!("Pairing code: {}", qr.code);
                 println!();
                 println!("Scan this QR (or read this payload to the other device) and run:");
-                println!("  canopee pair {} --code {}", BASE64.encode(&payload), qr.code);
+                println!(
+                    "  canopee pair {} --code {}",
+                    BASE64.encode(&payload),
+                    qr.code
+                );
                 println!();
                 println!(
                     "The source device will copy your identity to {} ({}).",

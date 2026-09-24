@@ -73,13 +73,15 @@ pub(crate) async fn profile(name: Option<String>) {
 pub(crate) async fn username(command: crate::UsernameCommand) {
     let client = CanopeeClient::connect().await.unwrap();
     match command {
-        crate::UsernameCommand::Claim { username } => match client.claim_username(&username).await {
-            Ok(()) => println!("Claimed username \"{username}\""),
-            Err(e) => {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
+        crate::UsernameCommand::Claim { username } => {
+            match client.claim_username(&username).await {
+                Ok(()) => println!("Claimed username \"{username}\""),
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
             }
-        },
+        }
         crate::UsernameCommand::Show => match client.show_username().await {
             Ok(Some(username)) => println!("{username}"),
             Ok(None) => {
@@ -90,15 +92,16 @@ pub(crate) async fn username(command: crate::UsernameCommand) {
                 std::process::exit(1);
             }
         },
-        crate::UsernameCommand::Lookup { username } => match client.resolve_username(&username).await
-        {
-            Ok(Some(owner)) => println!("{username} -> {owner}"),
-            Ok(None) => println!("No username \"{username}\" claimed"),
-            Err(e) => {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
+        crate::UsernameCommand::Lookup { username } => {
+            match client.resolve_username(&username).await {
+                Ok(Some(owner)) => println!("{username} -> {owner}"),
+                Ok(None) => println!("No username \"{username}\" claimed"),
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
             }
-        },
+        }
     }
 }
 

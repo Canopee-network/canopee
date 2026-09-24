@@ -47,8 +47,8 @@ pub(crate) async fn publish(directory: String) {
         Ok(addr) if !addr.trim().is_empty() => addr,
         _ => canopee_network::DEFAULT_BOOTSTRAP_ADDRS[0].to_string(),
     };
-    let base_domain = env::var("CANOPEE_PUBLIC_BASE_DOMAIN")
-        .unwrap_or_else(|_| "canopee.network".to_string());
+    let base_domain =
+        env::var("CANOPEE_PUBLIC_BASE_DOMAIN").unwrap_or_else(|_| "canopee.network".to_string());
 
     // 2. Upload the files (suppressing per-file progress), build the manifest,
     //    and point `app:<dirname>` at it so `open --name <dirname>` still

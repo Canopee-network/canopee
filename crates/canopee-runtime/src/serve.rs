@@ -6,8 +6,8 @@
 use crate::http::render_response;
 use crate::Runtime;
 use canopee_network::{
-    InboundServe, Multiaddr, PeerId, ServeRegistration, ServeRegistrationResponse, ServeRequest,
-    ServeResponse, app_subdomain, peer_id_from_multiaddr,
+    app_subdomain, peer_id_from_multiaddr, InboundServe, Multiaddr, PeerId, ServeRegistration,
+    ServeRegistrationResponse, ServeRequest, ServeResponse,
 };
 use canopee_storage::{AppManifest, ObjectId};
 use std::collections::HashMap;
@@ -100,9 +100,9 @@ impl Runtime {
         // fails here, not after the edge has pinned the subdomain.
         let files = Arc::new(self.load_app_files(app_id).await?);
 
-        let edge_addr: Multiaddr = edge_addr.parse().map_err(|e| {
-            anyhow::anyhow!("invalid edge address `{edge_addr}`: {e}")
-        })?;
+        let edge_addr: Multiaddr = edge_addr
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid edge address `{edge_addr}`: {e}"))?;
         let edge_peer_id = peer_id_from_multiaddr(&edge_addr).ok_or_else(|| {
             anyhow::anyhow!("edge address must end with /p2p/<peer-id>: {edge_addr}")
         })?;
@@ -206,12 +206,8 @@ impl Runtime {
             return;
         };
         // Signed deregistration so the edge drops the app↔peer mapping.
-        let dereg = ServeRegistration::sign(
-            &self.identity,
-            &session.app_id,
-            DEREGISTER_TIMESTAMP,
-        )
-        .ok();
+        let dereg =
+            ServeRegistration::sign(&self.identity, &session.app_id, DEREGISTER_TIMESTAMP).ok();
         if let Some(dereg) = dereg {
             if let Ok(ServeRegistrationResponse::Ok) = self
                 .network
@@ -232,11 +228,7 @@ impl Runtime {
     /// Serves one forwarded HTTP request against the session's pinned files.
     /// The path is app-relative: `/` is the entrypoint, anything else an
     /// asset path (with the SPA fallback handled by `render_response`).
-    async fn serve_request(
-        &self,
-        files: &Arc<AppFiles>,
-        request: ServeRequest,
-    ) -> ServeResponse {
+    async fn serve_request(&self, files: &Arc<AppFiles>, request: ServeRequest) -> ServeResponse {
         let mut path: &str = &request.path;
         if let Some(no_query) = path.split('?').next() {
             if !no_query.is_empty() {

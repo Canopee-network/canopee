@@ -99,7 +99,11 @@ pub fn render_response(
                 RangeSpec::Bytes(start, end) => {
                     response.status = "206 Partial Content".into();
                     push_header(&mut response.headers, "Content-Type", content_type);
-                    push_header(&mut response.headers, "Content-Length", &part_len_text(end - start + 1));
+                    push_header(
+                        &mut response.headers,
+                        "Content-Length",
+                        &part_len_text(end - start + 1),
+                    );
                     push_header(&mut response.headers, "Accept-Ranges", "bytes");
                     push_header(
                         &mut response.headers,
@@ -129,7 +133,11 @@ pub fn render_response(
 
     response.status = "200 OK".into();
     push_header(&mut response.headers, "Content-Type", content_type);
-    push_header(&mut response.headers, "Content-Length", &payload.len().to_string());
+    push_header(
+        &mut response.headers,
+        "Content-Length",
+        &payload.len().to_string(),
+    );
     if let Some(etag_value) = &etag_value {
         push_header(&mut response.headers, "ETag", etag_value);
     }
@@ -357,8 +365,10 @@ mod tests {
     #[test]
     fn missing_file_never_returns_304_even_with_matching_etag_header() {
         let files = sample_files();
-        let headers =
-            vec![("If-None-Match".to_string(), format!("\"{}\"", ObjectId::from_data(b"").0))];
+        let headers = vec![(
+            "If-None-Match".to_string(),
+            format!("\"{}\"", ObjectId::from_data(b"").0),
+        )];
         let r = render_response(&files, "GET", "/assets/not-there.js", &headers);
         assert_eq!(r.status, "404 Not Found");
     }
@@ -396,7 +406,9 @@ mod tests {
         assert_eq!(resp_header(&r, "vary"), "Accept-Encoding");
 
         let mut decoded = Vec::new();
-        GzDecoder::new(&r.body[..]).read_to_end(&mut decoded).unwrap();
+        GzDecoder::new(&r.body[..])
+            .read_to_end(&mut decoded)
+            .unwrap();
         assert_eq!(decoded, sample_files()["/style.css"]);
 
         // No gzip unless the client asks; binary types never compress.

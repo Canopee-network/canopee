@@ -61,16 +61,13 @@ pub fn resolve_owner(owner: &str) -> anyhow::Result<String> {
         return Ok(owner.to_string());
     }
     let aliases = load_aliases(&aliases_path())?;
-    aliases
-        .get(owner)
-        .cloned()
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no alias \"{owner}\" in {} (set one with `canopee alias set {owner} <owner>`, \
+    aliases.get(owner).cloned().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no alias \"{owner}\" in {} (set one with `canopee alias set {owner} <owner>`, \
                  or use the canonical canopee://identity/<peer-id> form)",
-                aliases_path().display()
-            )
-        })
+            aliases_path().display()
+        )
+    })
 }
 
 /// Sets `name -> owner` in the aliases file, creating it if needed.
@@ -95,8 +92,7 @@ pub fn remove_alias(name: &str) -> anyhow::Result<bool> {
 
 /// Returns the current aliases (name -> canonical owner).
 pub fn list_aliases() -> anyhow::Result<Vec<(String, String)>> {
-    let mut aliases: Vec<(String, String)> =
-        load_aliases(&aliases_path())?.into_iter().collect();
+    let mut aliases: Vec<(String, String)> = load_aliases(&aliases_path())?.into_iter().collect();
     aliases.sort();
     Ok(aliases)
 }
@@ -198,10 +194,7 @@ fn register_macos() -> anyhow::Result<()> {
         &script,
         format!("#!/bin/sh\nexec \"{}\" handle \"$1\"\n", bin.display()),
     )?;
-    std::fs::set_permissions(
-        &script,
-        std::os::unix::fs::PermissionsExt::from_mode(0o755),
-    )?;
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
 
     // Tell LaunchServices about the bundle so the scheme is claimable.
     let lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
@@ -217,7 +210,10 @@ fn unregister_macos() -> anyhow::Result<()> {
     let bundle = macos_app_bundle_path();
     let lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
     if bundle.exists() {
-        std::process::Command::new(lsregister).arg("-u").arg(&bundle).status()?;
+        std::process::Command::new(lsregister)
+            .arg("-u")
+            .arg(&bundle)
+            .status()?;
         std::fs::remove_dir_all(&bundle)?;
     }
     Ok(())
@@ -241,7 +237,11 @@ fn register_linux() -> anyhow::Result<()> {
     );
     std::fs::write(&path, desktop)?;
     let status = std::process::Command::new("xdg-mime")
-        .args(["default", "canopee-uri-handler.desktop", "x-scheme-handler/canopee"])
+        .args([
+            "default",
+            "canopee-uri-handler.desktop",
+            "x-scheme-handler/canopee",
+        ])
         .status();
     match status {
         Ok(s) if s.success() => Ok(()),
@@ -266,8 +266,14 @@ fn unregister_linux() -> anyhow::Result<()> {
 fn register_windows() -> anyhow::Result<()> {
     let bin = std::env::current_exe()?;
     let key = r"HKCU\Software\Classes\canopee";
-    let command = format!("reg add \"{}\\shell\\open\\command\" /ve /t REG_SZ /d \"\\\"{}\\\" handle \\\"%1\\\"\" /f", key, bin.display());
-    let status = std::process::Command::new("cmd").args(["/C", &command]).status()?;
+    let command = format!(
+        "reg add \"{}\\shell\\open\\command\" /ve /t REG_SZ /d \"\\\"{}\\\" handle \\\"%1\\\"\" /f",
+        key,
+        bin.display()
+    );
+    let status = std::process::Command::new("cmd")
+        .args(["/C", &command])
+        .status()?;
     if !status.success() {
         anyhow::bail!("reg add failed");
     }
@@ -301,8 +307,7 @@ mod tests {
 
     #[test]
     fn parses_canonical_owner() {
-        let (owner, name) =
-            split_uri("canopee://identity/12D3KooWx/portfolio").unwrap();
+        let (owner, name) = split_uri("canopee://identity/12D3KooWx/portfolio").unwrap();
         assert_eq!(owner, "canopee://identity/12D3KooWx");
         assert_eq!(name, "portfolio");
     }
@@ -317,8 +322,7 @@ mod tests {
 
     #[test]
     fn canonical_owner_passes_through() {
-        let resolved =
-            resolve_owner("canopee://identity/12D3KooWx").unwrap();
+        let resolved = resolve_owner("canopee://identity/12D3KooWx").unwrap();
         assert_eq!(resolved, "canopee://identity/12D3KooWx");
     }
 }

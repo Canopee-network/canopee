@@ -27,7 +27,10 @@ impl Runtime {
     /// Loads the user's latest `HomeIndex` from the shared store, via the
     /// `(owner, "home")` record.
     pub async fn load_home_index(&self) -> anyhow::Result<Option<HomeIndex>> {
-        let record = match self.resolve_pointer(self.identity.id(), RECORD_HOME).await? {
+        let record = match self
+            .resolve_pointer(self.identity.id(), RECORD_HOME)
+            .await?
+        {
             Some(r) => r,
             None => return Ok(None),
         };
@@ -61,10 +64,9 @@ impl Runtime {
         name: &str,
         shared: bool,
     ) -> anyhow::Result<ObjectId> {
-        let mut index = self
-            .load_home_index()
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("no home index yet — save one before sharing entries"))?;
+        let mut index = self.load_home_index().await?.ok_or_else(|| {
+            anyhow::anyhow!("no home index yet — save one before sharing entries")
+        })?;
         let entry = index
             .entries
             .iter_mut()
@@ -120,7 +122,10 @@ impl Runtime {
     /// Publishes the `(owner, "entry:<name>")` pointer record pointing at
     /// `id`, so remote peers can resolve a shared entry by its human name.
     async fn publish_entry_pointer(&self, name: &str, id: &ObjectId) {
-        if let Err(e) = self.publish_pointer(&format!("entry:{name}"), id.clone()).await {
+        if let Err(e) = self
+            .publish_pointer(&format!("entry:{name}"), id.clone())
+            .await
+        {
             tracing::warn!("publishing entry pointer {name:?} failed: {e}");
         }
     }
@@ -177,6 +182,37 @@ impl Runtime {
         if let Ok(object) = self.storage.get_verified(&object_id).await {
             return Ok(object);
         }
+        // Directly-connected peers first: after Store-based replication these
+        // hold the object in their own store, so asking them is deterministic
+        // and does not gamble on DHT provider-record propagation (the cause of
+        // flaky "no provider for object" pulls on a small relay-only network).
+        for peer in self.network.peers().await? {
+            if Some(peer.peer_id) == from {
+                continue; // handled by the explicit `from` arm below
+            }
+            match self.network.get_object(peer.peer_id, object_id.clone()).await {
+                Ok(bundle) => {
+                    let object = bundle.object.clone();
+                    self.import(bundle).await?;
+                    return Ok(object);
+                }
+                Err(e) => tracing::debug!(
+                    "fetch from connected peer {:?} failed: {e}",
+                    peer.peer_id
+                ),
+            }
+        }
+        if let Some(peer) = from {
+            match self.network.get_object(peer, object_id.clone()).await {
+                Ok(bundle) => {
+                    let object = bundle.object.clone();
+                    self.import(bundle).await?;
+                    return Ok(object);
+                }
+                Err(e) => tracing::debug!("fetch from explicit {peer} failed: {e}"),
+            }
+        }
+        // DHT fallback: only reached when no directly-connected peer had it.
         let providers = self.network.find_providers(object_id.clone()).await?;
         for provider in providers {
             match self.network.get_object(provider, object_id.clone()).await {
@@ -187,12 +223,6 @@ impl Runtime {
                 }
                 Err(e) => tracing::warn!("fetch from {provider} failed: {e}"),
             }
-        }
-        if let Some(peer) = from {
-            let bundle = self.network.get_object(peer, object_id).await?;
-            let object = bundle.object.clone();
-            self.import(bundle).await?;
-            return Ok(object);
         }
         Err(anyhow::anyhow!("no provider for object {object_id}"))
     }

@@ -255,7 +255,9 @@ pub(crate) async fn chat(topic: String) {
         while let Ok(Some(message)) = subscription.next().await {
             let text = String::from_utf8_lossy(&message.data);
             let from = message.source.as_deref().unwrap_or("unknown");
-            let name = names.entry(from.to_string()).or_insert_with(|| short_peer_id(from));
+            let name = names
+                .entry(from.to_string())
+                .or_insert_with(|| short_peer_id(from));
             println!("{name}: {text}");
         }
         println!("Subscription closed");

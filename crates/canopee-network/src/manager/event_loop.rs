@@ -1,40 +1,50 @@
+use super::{
+    relay_peer_id_from_circuit_addr, Command, InboundPairing, InboundServe,
+    InboundServeRegistration, ObjectProvider, ObjectStore,
+};
 use crate::behaviour::{CanopeeBehaviour, CanopeeBehaviourEvent};
 use crate::message::{
-    CanopeePairingResponse, ObjectRequest, ObjectResponse, PubSubMessage, ServeRegistrationResponse,
-    ServeResponse,
+    CanopeePairingResponse, ObjectRequest, ObjectResponse, PubSubMessage,
+    ServeRegistrationResponse, ServeResponse,
 };
 use crate::peer::{Peer, RelayReservation};
-use super::{
-    Command, InboundPairing, InboundServe, InboundServeRegistration, ObjectProvider,
-    relay_peer_id_from_circuit_addr,
-};
 use canopee_storage::ExportBundle;
-use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
+use futures::{future::BoxFuture, stream::FuturesUnordered, StreamExt};
 use libp2p::kad;
 use libp2p::request_response;
 use libp2p::swarm::SwarmEvent;
-use libp2p::{Multiaddr, PeerId, autonat, gossipsub, identify, mdns, relay};
+use libp2p::{autonat, gossipsub, identify, mdns, relay, Multiaddr, PeerId};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-type PairingReplyFuture = BoxFuture<'static, (
-    request_response::ResponseChannel<CanopeePairingResponse>,
-    CanopeePairingResponse,
-)>;
-type ServeReplyFuture = BoxFuture<'static, (
-    request_response::ResponseChannel<ServeResponse>,
-    ServeResponse,
-)>;
-type ServeRegistryReplyFuture = BoxFuture<'static, (
-    request_response::ResponseChannel<ServeRegistrationResponse>,
-    ServeRegistrationResponse,
-)>;
+type PairingReplyFuture = BoxFuture<
+    'static,
+    (
+        request_response::ResponseChannel<CanopeePairingResponse>,
+        CanopeePairingResponse,
+    ),
+>;
+type ServeReplyFuture = BoxFuture<
+    'static,
+    (
+        request_response::ResponseChannel<ServeResponse>,
+        ServeResponse,
+    ),
+>;
+type ServeRegistryReplyFuture = BoxFuture<
+    'static,
+    (
+        request_response::ResponseChannel<ServeRegistrationResponse>,
+        ServeRegistrationResponse,
+    ),
+>;
 
 pub(super) async fn run_event_loop(
     mut swarm: libp2p::Swarm<CanopeeBehaviour>,
     mut commands: mpsc::Receiver<Command>,
     object_provider: Arc<dyn ObjectProvider>,
+    object_store: Arc<dyn ObjectStore>,
     pubsub: broadcast::Sender<PubSubMessage>,
     pairing_events: broadcast::Sender<InboundPairing>,
     serve_events: broadcast::Sender<InboundServe>,
@@ -54,6 +64,10 @@ pub(super) async fn run_event_loop(
     let mut pending_get_object: HashMap<
         request_response::OutboundRequestId,
         oneshot::Sender<anyhow::Result<ExportBundle>>,
+    > = HashMap::new();
+    let mut pending_replicate: HashMap<
+        request_response::OutboundRequestId,
+        oneshot::Sender<anyhow::Result<()>>,
     > = HashMap::new();
     let mut pending_pairing_request: HashMap<
         request_response::OutboundRequestId,
@@ -86,8 +100,10 @@ pub(super) async fn run_event_loop(
                     &mut pending_put_record,
                     &mut pending_get_record,
                     &mut pending_get_object,
+                    &mut pending_replicate,
                     &mut pending_pairing_request,
                     &object_provider,
+                    &object_store,
                     &pubsub,
                     &pairing_events,
                     &serve_events,
@@ -109,6 +125,7 @@ pub(super) async fn run_event_loop(
                     &mut pending_put_record,
                     &mut pending_get_record,
                     &mut pending_get_object,
+                    &mut pending_replicate,
                     &mut pending_pairing_request,
                     &mut pending_serve_registration,
                     &mut pending_serve_request,
@@ -175,6 +192,10 @@ pub(super) fn handle_command(
     pending_get_object: &mut HashMap<
         request_response::OutboundRequestId,
         oneshot::Sender<anyhow::Result<ExportBundle>>,
+    >,
+    pending_replicate: &mut HashMap<
+        request_response::OutboundRequestId,
+        oneshot::Sender<anyhow::Result<()>>,
     >,
     pending_pairing_request: &mut HashMap<
         request_response::OutboundRequestId,
@@ -255,6 +276,77 @@ pub(super) fn handle_command(
                 .send_request(&peer_id, ObjectRequest::GetObject(object_id));
             pending_get_object.insert(request_id, reply);
         }
+        Command::ReplicateObject {
+            peer_id,
+            bundle,
+            reply,
+        } => {
+            // Targets: the explicitly named peer, or every currently connected
+            // peer (the same set `peers()` reports — mDNS-discovered, dialed,
+            // bootstrap relays, everything).
+            let targets: Vec<PeerId> = match peer_id {
+                Some(pid) => {
+                    if peers.contains_key(&pid) {
+                        vec![pid]
+                    } else {
+                        let _ = reply.send(Err(anyhow::anyhow!("peer {pid} is not connected")));
+                        return;
+                    }
+                }
+                None => peers.keys().copied().collect(),
+            };
+            if targets.is_empty() {
+                // Nothing reachable to push to; the DHT announce path still
+                // makes the object discoverable, so this is not an error.
+                tracing::debug!("replicate_object: no connected peers to push to");
+                let _ = reply.send(Ok(()));
+                return;
+            }
+            let mut senders: Vec<(PeerId, oneshot::Receiver<anyhow::Result<()>>)> = Vec::new();
+            for target in targets {
+                let request_id = swarm
+                    .behaviour_mut()
+                    .object_exchange
+                    .send_request(&target, ObjectRequest::Store(bundle.clone()));
+                let (tx, rx) = oneshot::channel();
+                pending_replicate.insert(request_id, tx);
+                senders.push((target, rx));
+            }
+            // Collect the per-target verdicts off the event-loop thread: each
+            // request_response round-trip is timeout-bounded by libp2p, so
+            // this can never hang the loop. Failures surface as
+            // `OutboundFailure` events, which resolve the `pending_replicate`
+            // sender with an error.
+            tokio::spawn(async move {
+                let mut successes = 0usize;
+                let mut first_error: Option<anyhow::Error> = None;
+                for (target, rx) in senders {
+                    match rx.await {
+                        Ok(Ok(())) => successes += 1,
+                        Ok(Err(e)) => {
+                            tracing::warn!("peer {target} refused pushed object: {e}");
+                            if first_error.is_none() {
+                                first_error = Some(e);
+                            }
+                        }
+                        Err(_) => {
+                            tracing::warn!("peer {target} dropped the Store response");
+                            if first_error.is_none() {
+                                first_error =
+                                    Some(anyhow::anyhow!("peer {target} dropped the response"));
+                            }
+                        }
+                    }
+                }
+                // Broadcast is best-effort: at least one peer storing counts
+                // as success (a connected relay/edge legitimately refuses).
+                // An explicit single target is strict.
+                let _ = reply.send(match first_error {
+                    Some(e) if successes == 0 => Err(e),
+                    _ => Ok(()),
+                });
+            });
+        }
         Command::SendPairing {
             peer_id,
             request,
@@ -282,10 +374,7 @@ pub(super) fn handle_command(
             request,
             reply,
         } => {
-            let request_id = swarm
-                .behaviour_mut()
-                .serve
-                .send_request(&peer_id, request);
+            let request_id = swarm.behaviour_mut().serve.send_request(&peer_id, request);
             pending_serve_request.insert(request_id, reply);
         }
         Command::ListPeers(reply) => {
@@ -355,11 +444,16 @@ pub(super) async fn handle_swarm_event(
         request_response::OutboundRequestId,
         oneshot::Sender<anyhow::Result<ExportBundle>>,
     >,
+    pending_replicate: &mut HashMap<
+        request_response::OutboundRequestId,
+        oneshot::Sender<anyhow::Result<()>>,
+    >,
     pending_pairing_request: &mut HashMap<
         request_response::OutboundRequestId,
         oneshot::Sender<anyhow::Result<String>>,
     >,
     object_provider: &Arc<dyn ObjectProvider>,
+    object_store: &Arc<dyn ObjectStore>,
     pubsub: &broadcast::Sender<PubSubMessage>,
     pairing_events: &broadcast::Sender<InboundPairing>,
     serve_events: &broadcast::Sender<InboundServe>,
@@ -399,9 +493,7 @@ pub(super) async fn handle_swarm_event(
         } => {
             tracing::debug!("Incoming connection error on {local_addr}: {error}");
         }
-        SwarmEvent::OutgoingConnectionError {
-            peer_id, error, ..
-        } => {
+        SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
             tracing::debug!("Outgoing connection error to {peer_id:?}: {error}");
         }
         SwarmEvent::ConnectionEstablished {
@@ -410,9 +502,7 @@ pub(super) async fn handle_swarm_event(
             if peer_id == *swarm.local_peer_id() {
                 return;
             }
-            peers
-                .entry(peer_id)
-                .or_insert_with(|| Peer::new(peer_id));
+            peers.entry(peer_id).or_insert_with(|| Peer::new(peer_id));
             swarm
                 .behaviour_mut()
                 .kad
@@ -596,10 +686,28 @@ pub(super) async fn handle_swarm_event(
                 request_id,
                 response,
             } => {
-                if let Some(reply) = pending_get_object.remove(&request_id) {
+                if let Some(reply) = pending_replicate.remove(&request_id) {
+                    let result = match response {
+                        ObjectResponse::Stored => Ok(()),
+                        ObjectResponse::StoreFailed(e) => {
+                            Err(anyhow::anyhow!("Pushed object refused by peer: {e}"))
+                        }
+                        ObjectResponse::Object(_) | ObjectResponse::NotFound => {
+                            Err(anyhow::anyhow!(
+                                "peer answered a Store request with a GetObject response"
+                            ))
+                        }
+                    };
+                    let _ = reply.send(result);
+                } else if let Some(reply) = pending_get_object.remove(&request_id) {
                     let result = match response {
                         ObjectResponse::Object(bundle) => Ok(bundle),
                         ObjectResponse::NotFound => Err(anyhow::anyhow!("Object not found")),
+                        ObjectResponse::Stored | ObjectResponse::StoreFailed(_) => {
+                            Err(anyhow::anyhow!(
+                                "peer answered a GetObject request with a Store response"
+                            ))
+                        }
                     };
                     let _ = reply.send(result);
                 }
@@ -607,15 +715,37 @@ pub(super) async fn handle_swarm_event(
             request_response::Message::Request {
                 request, channel, ..
             } => {
-                let ObjectRequest::GetObject(object_id) = request;
-                let response = match object_provider.get_object(&object_id).await {
-                    Some(bundle) => ObjectResponse::Object(bundle),
-                    None => ObjectResponse::NotFound,
-                };
-                let _ = swarm
-                    .behaviour_mut()
-                    .object_exchange
-                    .send_response(channel, response);
+                match request {
+                    ObjectRequest::GetObject(object_id) => {
+                        let response = match object_provider.get_object(&object_id).await {
+                            Some(bundle) => ObjectResponse::Object(bundle),
+                            None => ObjectResponse::NotFound,
+                        };
+                        let _ = swarm
+                            .behaviour_mut()
+                            .object_exchange
+                            .send_response(channel, response);
+                    }
+                    // A peer actively pushing an object to us. `put_verified`
+                    // both verifies the signature and persists, so an invalid
+                    // push is refused here rather than trusted on arrival.
+                    ObjectRequest::Store(bundle) => {
+                        let response = match object_store.put_verified(&bundle.object).await {
+                            Ok(()) => ObjectResponse::Stored,
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Refusing pushed object {} from a peer: {e:#}",
+                                    bundle.object.id
+                                );
+                                ObjectResponse::StoreFailed(e.to_string())
+                            }
+                        };
+                        let _ = swarm
+                            .behaviour_mut()
+                            .object_exchange
+                            .send_response(channel, response);
+                    }
+                }
             }
         },
         SwarmEvent::Behaviour(CanopeeBehaviourEvent::ObjectExchange(
@@ -623,7 +753,9 @@ pub(super) async fn handle_swarm_event(
                 request_id, error, ..
             },
         )) => {
-            if let Some(reply) = pending_get_object.remove(&request_id) {
+            if let Some(reply) = pending_replicate.remove(&request_id) {
+                let _ = reply.send(Err(anyhow::anyhow!("Store request failed: {error}")));
+            } else if let Some(reply) = pending_get_object.remove(&request_id) {
                 let _ = reply.send(Err(anyhow::anyhow!("Request failed: {error}")));
             }
         }
@@ -650,9 +782,12 @@ pub(super) async fn handle_swarm_event(
                     tracing::warn!("No pairing handler subscribed; ignoring inbound pairing");
                 }
                 pairing_replies.push(Box::pin(async move {
-                    let response = reply_rx.recv().await.unwrap_or(
-                        CanopeePairingResponse::Error("pairing handler unavailable".into()),
-                    );
+                    let response = reply_rx
+                        .recv()
+                        .await
+                        .unwrap_or(CanopeePairingResponse::Error(
+                            "pairing handler unavailable".into(),
+                        ));
                     (channel, response)
                 }));
                 // A bounded sender means the request already timed out on the
@@ -683,9 +818,11 @@ pub(super) async fn handle_swarm_event(
                 let _ = reply.send(Err(anyhow::anyhow!("Pairing request failed: {error}")));
             }
         }
-        SwarmEvent::Behaviour(CanopeeBehaviourEvent::Serve(
-            request_response::Event::Message { peer, message, .. },
-        )) => match message {
+        SwarmEvent::Behaviour(CanopeeBehaviourEvent::Serve(request_response::Event::Message {
+            peer,
+            message,
+            ..
+        })) => match message {
             request_response::Message::Request {
                 request, channel, ..
             } => {
@@ -746,9 +883,7 @@ pub(super) async fn handle_swarm_event(
                 }
                 serve_registry_replies.push(Box::pin(async move {
                     let response = reply_rx.recv().await.unwrap_or_else(|| {
-                        ServeRegistrationResponse::Error(
-                            "this node is not a Canopee edge".into(),
-                        )
+                        ServeRegistrationResponse::Error("this node is not a Canopee edge".into())
                     });
                     (channel, response)
                 }));

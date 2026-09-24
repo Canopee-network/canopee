@@ -188,7 +188,9 @@ pub(crate) async fn resolve_owner_arg(
     }
     // Canonical identity form: the embedded peer id doubles as the owner.
     let owner = if let Some(peer_id) = arg.strip_prefix("canopee://identity/") {
-        Some(canopee_sdk::IdentityId::new(format!("canopee://identity/{peer_id}")))
+        Some(canopee_sdk::IdentityId::new(format!(
+            "canopee://identity/{peer_id}"
+        )))
     } else {
         // Otherwise treat it as a username and reverse-resolve it to its owner.
         client.resolve_username(arg).await?

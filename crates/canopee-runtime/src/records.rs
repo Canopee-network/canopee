@@ -2,8 +2,8 @@ use crate::{normalize_username, owner_peer_id, Runtime};
 use canopee_identity::IdentityId;
 use canopee_network::PeerId;
 use canopee_storage::{
-    AppPointerRecord, ContactList, DeviceEntry, DeviceList, RECORD_CONTACTS, RECORD_DEVICES,
-    RECORD_PROFILE, RECORD_USERNAME, USERNAME_REGISTRY_PREFIX,
+    AppPointerRecord, ContactList, DeviceEntry, DeviceList, Export, Object, ObjectType,
+    RECORD_CONTACTS, RECORD_DEVICES, RECORD_PROFILE, RECORD_USERNAME, USERNAME_REGISTRY_PREFIX,
 };
 use time::OffsetDateTime;
 
@@ -25,6 +25,16 @@ impl Runtime {
         let tmp = path.with_extension("tmp");
         tokio::fs::write(&tmp, &bytes).await?;
         tokio::fs::rename(&tmp, path).await?;
+        // Circuit-connected-peers-first delivery: wrap the signed record bytes
+        // in a content-addressed AppPointer Object and actively Store-push it
+        // into every connected peer's store — the same replication path
+        // `fetch_object` pulls from — so a paired device (or any connected
+        // peer) can refresh this pointer deterministically instead of racing
+        // an empty DHT provider sweep behind a shared relay. Best-effort: a
+        // failing push is logged and the DHT put below remains the fallback.
+        if let Err(e) = self.push_pointer_record(bytes.clone()).await {
+            tracing::warn!("pushing pointer record ({name}) to connected peers failed: {e}");
+        }
         // Fire-and-forget DHT publication: best-effort, logged on failure.
         let network = self.network.clone();
         tokio::spawn(async move {
@@ -33,6 +43,48 @@ impl Runtime {
             }
         });
         Ok(())
+    }
+
+    /// Wraps the signed `AppPointerRecord` bytes in a verified AppPointer
+    /// Object and pushes it into every connected peer's store (mirroring
+    /// `concat_objects`). A local copy is kept so resolution on any device of
+    /// this identity sees the same record deterministically. The object's id
+    /// is the content hash of the record bytes, so a recipient verifies it
+    /// against the owner's identity on arrival.
+    async fn push_pointer_record(&self, bytes: Vec<u8>) -> anyhow::Result<()> {
+        let object = Object::new(&self.identity, bytes, ObjectType::AppPointer);
+        self.storage.put_verified(&object).await?;
+        self.network.replicate_object(object.export()?, None).await?;
+        Ok(())
+    }
+
+    /// Scans the content store for the newest verified AppPointer Object
+    /// carrying a signed `(owner, name)` pointer — i.e. one that the owner
+    /// Store-pushed into a connected peer's store at publish time. Used to
+    /// resolve pointers without gambling on the DHT. Returns `None` when this
+    /// device never received one for the key.
+    pub(crate) async fn latest_pointer_record(
+        &self,
+        owner: &IdentityId,
+        name: &str,
+    ) -> Option<AppPointerRecord> {
+        let ids = self.storage.list().await.ok()?;
+        let mut newest: Option<AppPointerRecord> = None;
+        for id in ids {
+            let object = self.storage.get_verified(&id).await.ok()?;
+            if object.payload.owner != *owner || object.object_type() != ObjectType::AppPointer {
+                continue;
+            }
+            let record: AppPointerRecord = object.decode().ok()?;
+            if record.name != name || !record.verify() {
+                continue;
+            }
+            match &newest {
+                Some(current) if current.published_at >= record.published_at => {}
+                _ => newest = Some(record),
+            }
+        }
+        newest
     }
 
     /// Resolves `(owner, name)` to the latest signed pointer. Checks the
@@ -45,12 +97,26 @@ impl Runtime {
         name: &str,
     ) -> anyhow::Result<Option<AppPointerRecord>> {
         let key = AppPointerRecord::key(owner, name);
-        let cache_path = self.config.records_path().join(format!("{}.record", hex::encode(&key)));
+        let cache_path = self
+            .config
+            .records_path()
+            .join(format!("{}.record", hex::encode(&key)));
         let from_cache = tokio::fs::read(&cache_path).await.ok().and_then(|bytes| {
             let record: AppPointerRecord = bincode::deserialize(&bytes).ok()?;
             (record.owner == *owner && record.name == name && record.verify()).then_some(record)
         });
         if let Some(record) = from_cache {
+            return Ok(Some(record));
+        }
+        // Circuit-connected-peers-first: the owner Store-pushed its newest
+        // signed pointer-object into connected peers' stores at publish time,
+        // so check that content store before falling back to the DHT. Cache
+        // the find so later resolves are instant.
+        if let Some(record) = self.latest_pointer_record(owner, name).await {
+            if let Ok(bytes) = bincode::serialize(&record) {
+                let _ = tokio::fs::create_dir_all(&self.config.records_path()).await;
+                let _ = tokio::fs::write(&cache_path, bytes).await;
+            }
             return Ok(Some(record));
         }
         // A DHT error or timeout (offline, no bootstrap peers yet) resolves
@@ -68,7 +134,10 @@ impl Runtime {
                 None
             }
             Err(_) => {
-                tracing::warn!("DHT get_record timed out after {:?}", crate::RESOLVE_DHT_TIMEOUT);
+                tracing::warn!(
+                    "DHT get_record timed out after {:?}",
+                    crate::RESOLVE_DHT_TIMEOUT
+                );
                 None
             }
         };
@@ -88,7 +157,10 @@ impl Runtime {
     /// Loads the user's latest `Profile` from the shared store, via the
     /// `(owner, "profile")` record. Returns `None` until one is published.
     pub async fn load_profile(&self) -> anyhow::Result<Option<canopee_storage::Profile>> {
-        let record = match self.resolve_pointer(self.identity.id(), RECORD_PROFILE).await? {
+        let record = match self
+            .resolve_pointer(self.identity.id(), RECORD_PROFILE)
+            .await?
+        {
             Some(r) => r,
             None => return Ok(None),
         };
@@ -161,7 +233,9 @@ impl Runtime {
         owner: &IdentityId,
     ) -> anyhow::Result<Option<canopee_storage::UsernameRecord>> {
         let object = self.resolve_owner_object(owner, RECORD_USERNAME).await?;
-        let Some(object) = object else { return Ok(None) };
+        let Some(object) = object else {
+            return Ok(None);
+        };
         Ok(Some(object.decode()?))
     }
 
@@ -173,7 +247,9 @@ impl Runtime {
         owner: &IdentityId,
     ) -> anyhow::Result<Option<canopee_storage::Profile>> {
         let object = self.resolve_owner_object(owner, RECORD_PROFILE).await?;
-        let Some(object) = object else { return Ok(None) };
+        let Some(object) = object else {
+            return Ok(None);
+        };
         Ok(Some(object.decode()?))
     }
 
@@ -288,6 +364,14 @@ impl Runtime {
         username: &str,
     ) -> anyhow::Result<Option<IdentityId>> {
         let username = normalize_username(username)?;
+        // Circuit-connected-peers-first: each publisher Store-pushes its
+        // signed `(owner, "username")` pointer-object into connected peers'
+        // stores, so reverse-resolve by scanning those delivered claims
+        // (verifying each candidate publishes exactly this name) before
+        // gambling on the DHT registry.
+        if let Some(owner) = self.owner_claiming_username(&username).await {
+            return Ok(Some(owner));
+        }
         let registry_key = format!("{USERNAME_REGISTRY_PREFIX}{username}").into_bytes();
         let Some(bytes) = self
             .network
@@ -303,11 +387,43 @@ impl Runtime {
         match self.resolve_username(&owner).await? {
             Some(record) if record.username == username => Ok(Some(owner)),
             Some(_) => {
-                tracing::warn!("username {username} claimed by an owner publishing a different name");
+                tracing::warn!(
+                    "username {username} claimed by an owner publishing a different name"
+                );
                 Ok(None)
             }
             None => Ok(None),
         }
+    }
+
+    /// Scans the content store for delivered AppPointer Objects carrying an
+    /// `(owner, "username")` pointer, and returns the first owner whose
+    /// verified `UsernameRecord` matches `username`. Successfully mirrors the
+    /// DHT `username:<name>` registry whenever the publisher's Store-push
+    /// landed in a connected peer.
+    async fn owner_claiming_username(&self, username: &str) -> Option<IdentityId> {
+        let ids = self.storage.list().await.ok()?;
+        let mut owners: Vec<IdentityId> = Vec::new();
+        for id in ids {
+            let object = self.storage.get_verified(&id).await.ok()?;
+            if object.object_type() != ObjectType::AppPointer {
+                continue;
+            }
+            let record: AppPointerRecord = object.decode().ok()?;
+            if record.name != RECORD_USERNAME || !record.verify() {
+                continue;
+            }
+            if !owners.contains(&record.owner) {
+                owners.push(record.owner);
+            }
+        }
+        for owner in owners {
+            match self.resolve_username(&owner).await.ok().flatten() {
+                Some(record) if record.username == username => return Some(owner),
+                _ => {}
+            }
+        }
+        None
     }
 
     /// The DHT record key mapping a device's network `PeerId` back to the
@@ -320,12 +436,11 @@ impl Runtime {
     /// Loads the list of devices carrying an identity, via the
     /// `(owner, "devices")` record (fetching from the network when not
     /// cached). `None` until the owner has registered at least one device.
-    pub async fn load_device_list(
-        &self,
-        owner: &IdentityId,
-    ) -> anyhow::Result<Option<DeviceList>> {
+    pub async fn load_device_list(&self, owner: &IdentityId) -> anyhow::Result<Option<DeviceList>> {
         let object = self.resolve_owner_object(owner, RECORD_DEVICES).await?;
-        let Some(object) = object else { return Ok(None) };
+        let Some(object) = object else {
+            return Ok(None);
+        };
         Ok(Some(object.decode()?))
     }
 
@@ -355,10 +470,13 @@ impl Runtime {
         device_id: &str,
         device_name: &str,
     ) -> anyhow::Result<DeviceList> {
-        let mut list = self.load_device_list(self.identity.id()).await?.unwrap_or(DeviceList {
-            devices: vec![],
-            version: 0,
-        });
+        let mut list = self
+            .load_device_list(self.identity.id())
+            .await?
+            .unwrap_or(DeviceList {
+                devices: vec![],
+                version: 0,
+            });
         let added_at = list.by_device_id(device_id).and_then(|d| d.added_at);
         if !list.devices.iter().any(|d| d.device_id == device_id) {
             list.devices.push(DeviceEntry {
@@ -425,10 +543,7 @@ impl Runtime {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
 
-            if let Err(e) = network
-                .put_record(registry_key, registry_value)
-                .await
-            {
+            if let Err(e) = network.put_record(registry_key, registry_value).await {
                 tracing::warn!("device registry re-publication failed: {e}");
             }
 
@@ -482,10 +597,7 @@ impl Runtime {
         let Some(list) = self.load_device_list(owner).await? else {
             return Ok(None);
         };
-        Ok(list
-            .devices
-            .iter()
-            .find_map(|d| d.device_id.parse().ok()))
+        Ok(list.devices.iter().find_map(|d| d.device_id.parse().ok()))
     }
 
     /// Writes `key → value` durably to the local record cache (awaited) and
@@ -524,7 +636,10 @@ impl Runtime {
                 None
             }
             Err(_) => {
-                tracing::warn!("DHT get_record timed out after {:?}", crate::RESOLVE_DHT_TIMEOUT);
+                tracing::warn!(
+                    "DHT get_record timed out after {:?}",
+                    crate::RESOLVE_DHT_TIMEOUT
+                );
                 None
             }
         };
@@ -547,7 +662,10 @@ impl Runtime {
     /// Loads the user's latest `ContactList` from the shared store, via the
     /// `(owner, "contacts")` record.
     pub async fn load_contact_list(&self) -> anyhow::Result<Option<ContactList>> {
-        let record = match self.resolve_pointer(self.identity.id(), RECORD_CONTACTS).await? {
+        let record = match self
+            .resolve_pointer(self.identity.id(), RECORD_CONTACTS)
+            .await?
+        {
             Some(r) => r,
             None => return Ok(None),
         };

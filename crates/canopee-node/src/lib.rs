@@ -252,6 +252,15 @@ impl Node {
                 },
             },
 
+            NodeCommand::Concat { ids, name } => {
+                match self.runtime.concat_objects(ids, name).await {
+                    Ok(id) => NodeResponse::Concatenated { id },
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+
             NodeCommand::SetName { id, name } => {
                 match self.runtime.storage.set_name(&id, &name).await {
                     Ok(()) => NodeResponse::NameSet,
@@ -353,11 +362,7 @@ impl Node {
                                 identity: peer.identity,
                                 username: peer.username,
                                 display_name: peer.display_name,
-                                addresses: peer
-                                    .addresses
-                                    .iter()
-                                    .map(|a| a.to_string())
-                                    .collect(),
+                                addresses: peer.addresses.iter().map(|a| a.to_string()).collect(),
                             })
                             .collect(),
                     },
@@ -417,17 +422,12 @@ impl Node {
                 data,
                 object_type,
                 name,
-            } => {
-                match self.runtime
-                    .put_object(data, object_type, name)
-                    .await
-                {
-                    Ok(object) => NodeResponse::ObjectCreated { id: object.id },
-                    Err(e) => NodeResponse::Error {
-                        message: e.to_string(),
-                    },
-                }
-            }
+            } => match self.runtime.put_object(data, object_type, name).await {
+                Ok(object) => NodeResponse::ObjectCreated { id: object.id },
+                Err(e) => NodeResponse::Error {
+                    message: e.to_string(),
+                },
+            },
 
             NodeCommand::PublishAppPointer { name, manifest } => {
                 let result = async {
@@ -469,7 +469,6 @@ impl Node {
             }
 
             // ---- user records (cache-aware Runtime layer) ----
-
             NodeCommand::PublishPointer { name, target } => {
                 match self.runtime.publish_pointer(&name, target).await {
                     Ok(()) => NodeResponse::PointerPublished,
@@ -630,11 +629,11 @@ impl Node {
                         devices: list
                             .map(|l| {
                                 l.devices
-                                .into_iter()
-                                .map(|d| DeviceInfo {
-                                    device_id: d.device_id,
-                                    device_name: d.device_name,
-                                })
+                                    .into_iter()
+                                    .map(|d| DeviceInfo {
+                                        device_id: d.device_id,
+                                        device_name: d.device_name,
+                                    })
                                     .collect()
                             })
                             .unwrap_or_default(),
@@ -659,11 +658,7 @@ impl Node {
             NodeCommand::AddDevice {
                 device_id,
                 device_name,
-            } => match self
-                .runtime
-                .add_device(&device_id, &device_name)
-                .await
-            {
+            } => match self.runtime.add_device(&device_id, &device_name).await {
                 Ok(_) => NodeResponse::DeviceAdded,
                 Err(e) => NodeResponse::Error {
                     message: e.to_string(),
@@ -679,14 +674,12 @@ impl Node {
                 }
             }
 
-            NodeCommand::InitiatePairing => {
-                match self.runtime.initiate_pairing().await {
-                    Ok(qr) => NodeResponse::PairingQr { qr },
-                    Err(e) => NodeResponse::Error {
-                        message: e.to_string(),
-                    },
-                }
-            }
+            NodeCommand::InitiatePairing => match self.runtime.initiate_pairing().await {
+                Ok(qr) => NodeResponse::PairingQr { qr },
+                Err(e) => NodeResponse::Error {
+                    message: e.to_string(),
+                },
+            },
 
             NodeCommand::CompletePairing { qr, code } => {
                 match self.runtime.complete_pairing(qr, &code).await {
@@ -697,28 +690,24 @@ impl Node {
                 }
             }
 
-            NodeCommand::SyncFromPeer { peer_id } => {
-                match peer_id.parse() {
-                    Ok(peer_id) => match self.runtime.sync_with_peer(peer_id).await {
-                        Ok(result) => NodeResponse::SyncComplete { result },
-                        Err(e) => NodeResponse::Error {
-                            message: e.to_string(),
-                        },
-                    },
-                    Err(e) => NodeResponse::Error {
-                        message: format!("invalid peer id: {e}"),
-                    },
-                }
-            }
-
-            NodeCommand::SyncDeviceList => {
-                match self.runtime.sync_with_all_devices().await {
+            NodeCommand::SyncFromPeer { peer_id } => match peer_id.parse() {
+                Ok(peer_id) => match self.runtime.sync_with_peer(peer_id).await {
                     Ok(result) => NodeResponse::SyncComplete { result },
                     Err(e) => NodeResponse::Error {
                         message: e.to_string(),
                     },
-                }
-            }
+                },
+                Err(e) => NodeResponse::Error {
+                    message: format!("invalid peer id: {e}"),
+                },
+            },
+
+            NodeCommand::SyncDeviceList => match self.runtime.sync_with_all_devices().await {
+                Ok(result) => NodeResponse::SyncComplete { result },
+                Err(e) => NodeResponse::Error {
+                    message: e.to_string(),
+                },
+            },
 
             NodeCommand::GrantCapability {
                 subject,
@@ -776,21 +765,19 @@ impl Node {
                 },
             },
 
-            NodeCommand::StartServeSession { edge_addr, app_id } => match self
-                .runtime
-                .start_serve_session(&edge_addr, &app_id)
-                .await
-            {
-                Ok((session, app_id)) => {
-                    let base = std::env::var("CANOPEE_PUBLIC_BASE_DOMAIN")
-                        .unwrap_or_else(|_| "canopee.network".to_string());
-                    let root_url = session.root_url(&base);
-                    NodeResponse::ServeSessionStarted { app_id, root_url }
+            NodeCommand::StartServeSession { edge_addr, app_id } => {
+                match self.runtime.start_serve_session(&edge_addr, &app_id).await {
+                    Ok((session, app_id)) => {
+                        let base = std::env::var("CANOPEE_PUBLIC_BASE_DOMAIN")
+                            .unwrap_or_else(|_| "canopee.network".to_string());
+                        let root_url = session.root_url(&base);
+                        NodeResponse::ServeSessionStarted { app_id, root_url }
+                    }
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
                 }
-                Err(e) => NodeResponse::Error {
-                    message: e.to_string(),
-                },
-            },
+            }
 
             NodeCommand::StopServeSession => {
                 self.runtime.stop_serve_session().await;
@@ -826,7 +813,8 @@ mod eviction_tests {
 
     fn scratch_home() -> &'static std::path::PathBuf {
         SETUP.call_once(|| {
-            let home = std::env::temp_dir().join(format!("canopee_node_test_{}", std::process::id()));
+            let home =
+                std::env::temp_dir().join(format!("canopee_node_test_{}", std::process::id()));
             std::fs::create_dir_all(&home).unwrap();
             unsafe {
                 std::env::set_var("HOME", &home);
@@ -839,13 +827,18 @@ mod eviction_tests {
     }
 
     async fn imported_object(runtime: &Runtime, data: &[u8]) -> (ObjectId, Object) {
-        let other_dir = std::env::temp_dir()
-            .join(format!("canopee_node_test_other_{}", std::process::id()));
+        let other_dir =
+            std::env::temp_dir().join(format!("canopee_node_test_other_{}", std::process::id()));
         std::fs::create_dir_all(&other_dir).unwrap();
         let other = Arc::new(
-            Identity::create(other_dir.join(format!("{}.key", data.len())).to_str().unwrap())
-                .await
-                .unwrap(),
+            Identity::create(
+                other_dir
+                    .join(format!("{}.key", data.len()))
+                    .to_str()
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
         );
         let object = Object::new(&other, data.to_vec(), ObjectType::Blob);
         let id = object.id.clone();
@@ -867,7 +860,10 @@ mod eviction_tests {
         }
         let (old_id, _) = imported_object(&runtime, &vec![0u8; 64 * 1024]).await;
         let (new_id, _) = imported_object(&runtime, &vec![1u8; 64 * 1024]).await;
-        let owned = runtime.put_object(vec![2u8; 64 * 1024], ObjectType::Blob, None).await.unwrap();
+        let owned = runtime
+            .put_object(vec![2u8; 64 * 1024], ObjectType::Blob, None)
+            .await
+            .unwrap();
 
         assert!(runtime.cached_bytes().await > 0);
 
@@ -893,7 +889,10 @@ mod eviction_tests {
         unsafe {
             std::env::set_var("CANOPEE_CACHE_MAX_MB", "0");
         }
-        let owned = runtime.put_object(vec![3u8; 64 * 1024], ObjectType::Blob, None).await.unwrap();
+        let owned = runtime
+            .put_object(vec![3u8; 64 * 1024], ObjectType::Blob, None)
+            .await
+            .unwrap();
         assert_eq!(runtime.cached_bytes().await, 0);
 
         node.evict_if_over_cap(cache_cap_bytes()).await;

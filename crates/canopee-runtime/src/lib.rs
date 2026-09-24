@@ -9,10 +9,9 @@ mod sync;
 
 use canopee_config::Config;
 use canopee_identity::{DeviceKey, Identity, IdentityId};
-use canopee_network::{Multiaddr, NetworkManager, ObjectProvider};
+use canopee_network::{Multiaddr, NetworkManager, ObjectProvider, ObjectStore};
 use canopee_storage::{
-    Cache, CacheIndex, Export, ExportBundle, Object, ObjectId, ObjectInfo, ObjectType,
-    Storage,
+    Cache, CacheIndex, Export, ExportBundle, Object, ObjectId, ObjectInfo, ObjectType, Storage,
 };
 use state::NodeState;
 use std::path::PathBuf;
@@ -115,6 +114,22 @@ impl ObjectProvider for StorageObjectProvider {
     }
 }
 
+/// The write slot of the object-exchange protocol: a peer pushing an object
+/// stores it in this node's content-addressed store, exactly like a local
+/// `put` — signature re-verified by `put_verified` on arrival, so an invalid
+/// push is refused. A pushed object owned by someone else is marked cached
+/// (servable onward) precisely as a pull-imported one.
+#[async_trait::async_trait]
+impl ObjectStore for StorageObjectProvider {
+    async fn put_verified(&self, object: &canopee_storage::Object) -> anyhow::Result<()> {
+        self.storage.put_verified(object).await?;
+        if !self.cache.is_owned(object) {
+            self.cache.mark_cached(&object.id).await;
+        }
+        Ok(())
+    }
+}
+
 impl Runtime {
     pub async fn open() -> anyhow::Result<Self> {
         Self::open_with_config(Config::new()).await
@@ -145,16 +160,15 @@ impl Runtime {
         let identity_dir = config.identity_path();
         tokio::fs::create_dir_all(&identity_dir).await?;
         let identity_path = identity_dir.join("identity.key");
-        let passphrase: Option<String> = std::env::var_os("CANOPEE_IDENTITY_PASS")
-            .and_then(|p| p.into_string().ok());
+        let passphrase: Option<String> =
+            std::env::var_os("CANOPEE_IDENTITY_PASS").and_then(|p| p.into_string().ok());
         let identity = match passphrase.as_deref() {
             Some(pass) => {
                 let path_str = identity_path.to_str().unwrap();
                 if !tokio::fs::try_exists(&identity_path).await.unwrap_or(false) {
                     Identity::create_encrypted(path_str, pass).await?
                 } else {
-                    let (id, encrypted_at_rest) =
-                        Identity::load_encrypted(path_str, pass).await?;
+                    let (id, encrypted_at_rest) = Identity::load_encrypted(path_str, pass).await?;
                     if !encrypted_at_rest {
                         eprintln!(
                             "WARNING: CANOPEE_IDENTITY_PASS is set but the identity key \
@@ -212,6 +226,7 @@ impl Runtime {
         let network = NetworkManager::new(
             device_key.keypair(),
             listen_addr,
+            object_provider.clone(),
             object_provider,
             config.mdns_enabled(),
         )?;
@@ -360,18 +375,15 @@ impl Runtime {
             );
         }
         if exists {
-            let backup = self
-                .config
-                .identity_path()
-                .join(format!(
-                    "identity.key.bak-{}",
-                    OffsetDateTime::now_utc().unix_timestamp()
-                ));
+            let backup = self.config.identity_path().join(format!(
+                "identity.key.bak-{}",
+                OffsetDateTime::now_utc().unix_timestamp()
+            ));
             tokio::fs::copy(&identity_path, &backup).await?;
         }
 
-        let passphrase: Option<String> = std::env::var_os("CANOPEE_IDENTITY_PASS")
-            .and_then(|p| p.into_string().ok());
+        let passphrase: Option<String> =
+            std::env::var_os("CANOPEE_IDENTITY_PASS").and_then(|p| p.into_string().ok());
         let bytes_to_write = match passphrase.as_deref() {
             Some(pass) => imported.export_encrypted(pass)?,
             None => imported.export_bytes()?,
@@ -416,6 +428,52 @@ impl Runtime {
     pub async fn get(&self, id: &ObjectId) -> anyhow::Result<Object> {
         let object = self.storage.get_verified(id).await?;
         Ok(object)
+    }
+
+    /// Concatenates the payloads of the given objects (each verified locally
+    /// or fetched from the network) into a single new blob, stores it, and
+    /// *actively replicates* it into every connected peer's store — the
+    /// push path, so a freshly shared concatenation travels to peers without
+    /// waiting for a DHT provider sweep. Returns the new object's id.
+    ///
+    /// The result is also announced and served like any shared object, so
+    /// peers who missed the push can still find it.
+    pub async fn concat_objects(
+        &self,
+        ids: Vec<ObjectId>,
+        name: Option<String>,
+    ) -> anyhow::Result<ObjectId> {
+        anyhow::ensure!(!ids.is_empty(), "concat needs at least one object");
+        let mut data = Vec::new();
+        let mut inputs = String::new();
+        for (i, id) in ids.iter().enumerate() {
+            let object = if let Ok(object) = self.storage.get_verified(id).await {
+                object
+            } else {
+                self.fetch_object(id.clone(), None).await?
+            };
+            if i > 0 {
+                inputs.push(',');
+            }
+            inputs.push_str(&object.id.0);
+            data.extend_from_slice(&object.payload.data);
+        }
+
+        let object = Object::new(&self.identity(), data, ObjectType::Blob);
+        let id = object.id.clone();
+        self.storage.put_verified(&object).await?;
+        if let Some(name) = name {
+            self.storage.set_name(&id, &name).await?;
+        }
+        tracing::info!("concat [{}] -> {id}", inputs);
+        self.announce(id.clone()).await?;
+        // Best-effort push to connected peers; a relay/edge with no store
+        // refuses, which is logged and ignored here.
+        match self.network.replicate_object(object.export()?, None).await {
+            Ok(()) => tracing::info!("replication of {id} to connected peers complete"),
+            Err(e) => tracing::warn!("replication of {id} failed, it remains DHT-announced: {e}"),
+        }
+        Ok(id)
     }
 
     pub async fn list(&self) -> anyhow::Result<Vec<ObjectInfo>> {
@@ -463,14 +521,13 @@ impl Runtime {
 }
 
 // DHT timeout shared by pointer resolution (records) and record sync (sync).
-pub(crate) const RESOLVE_DHT_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(10);
+pub(crate) const RESOLVE_DHT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use canopee_identity::Identity;
-    use canopee_storage::ObjectType;
+    use canopee_storage::{ObjectType, Verify};
     use std::sync::Once;
 
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -478,10 +535,8 @@ mod tests {
 
     fn with_scratch_home() -> &'static PathBuf {
         SETUP.call_once(|| {
-            let dir = std::env::temp_dir().join(format!(
-                "canopee_runtime_test_{}",
-                std::process::id()
-            ));
+            let dir =
+                std::env::temp_dir().join(format!("canopee_runtime_test_{}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             let dir: &'static PathBuf = Box::leak(Box::new(dir));
             unsafe {
@@ -500,10 +555,8 @@ mod tests {
         let _ = with_scratch_home();
         let runtime = Runtime::open().await.unwrap();
 
-        let other_dir = std::env::temp_dir().join(format!(
-            "canopee_runtime_test_other_{}",
-            std::process::id()
-        ));
+        let other_dir =
+            std::env::temp_dir().join(format!("canopee_runtime_test_other_{}", std::process::id()));
         std::fs::create_dir_all(&other_dir).unwrap();
         let other = Arc::new(
             Identity::create(other_dir.join("other.key").to_str().unwrap())
@@ -532,7 +585,10 @@ mod tests {
         let _ = with_scratch_home();
         let runtime = Runtime::open().await.unwrap();
 
-        let object = runtime.put_object(b"mine".to_vec(), ObjectType::Blob, None).await.unwrap();
+        let object = runtime
+            .put_object(b"mine".to_vec(), ObjectType::Blob, None)
+            .await
+            .unwrap();
         let id = object.id.clone();
 
         assert!(
@@ -552,10 +608,8 @@ mod tests {
     #[tokio::test]
     async fn with_root_gives_isolated_identities_and_storage() {
         let _guard = LOCK.lock().unwrap();
-        let base = std::env::temp_dir().join(format!(
-            "canopee_runtime_with_root_{}",
-            std::process::id()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("canopee_runtime_with_root_{}", std::process::id()));
         let root_a = base.join("a");
         let root_b = base.join("b");
 
@@ -617,8 +671,10 @@ mod tests {
         let _ = with_scratch_home();
         let runtime = Runtime::open().await.unwrap();
 
-        let other_dir =
-            std::env::temp_dir().join(format!("canopee_runtime_evict_other_{}", std::process::id()));
+        let other_dir = std::env::temp_dir().join(format!(
+            "canopee_runtime_evict_other_{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&other_dir).unwrap();
         let other = Arc::new(
             Identity::create(other_dir.join("other.key").to_str().unwrap())
@@ -645,25 +701,21 @@ mod tests {
     #[tokio::test]
     async fn shared_user_root_gives_one_identity_and_shared_store() {
         let _guard = LOCK.lock().unwrap();
-        let base = std::env::temp_dir().join(format!(
-            "canopee_runtime_shared_{}",
-            std::process::id()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("canopee_runtime_shared_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let user = base.join("user");
         let app_a = base.join("app-a");
         let app_b = base.join("app-b");
 
-        let runtime_a = Runtime::open_with_config(
-            Config::new().with_roots(app_a.clone(), user.clone()),
-        )
-        .await
-        .unwrap();
-        let runtime_b = Runtime::open_with_config(
-            Config::new().with_roots(app_b.clone(), user.clone()),
-        )
-        .await
-        .unwrap();
+        let runtime_a =
+            Runtime::open_with_config(Config::new().with_roots(app_a.clone(), user.clone()))
+                .await
+                .unwrap();
+        let runtime_b =
+            Runtime::open_with_config(Config::new().with_roots(app_b.clone(), user.clone()))
+                .await
+                .unwrap();
 
         assert_eq!(
             runtime_a.identity.id(),
@@ -706,10 +758,7 @@ mod tests {
             list.contacts[0].dh_public_key
         );
 
-        assert_ne!(
-            runtime_a.config.state_path(),
-            runtime_b.config.state_path()
-        );
+        assert_ne!(runtime_a.config.state_path(), runtime_b.config.state_path());
         assert!(runtime_a.config.state_path().starts_with(&app_a));
         assert!(runtime_b.config.state_path().starts_with(&app_b));
 
@@ -722,7 +771,10 @@ mod tests {
         let _ = with_scratch_home();
         let runtime = Runtime::open().await.unwrap();
 
-        let mine = runtime.put_object(b"keep me".to_vec(), ObjectType::Blob, None).await.unwrap();
+        let mine = runtime
+            .put_object(b"keep me".to_vec(), ObjectType::Blob, None)
+            .await
+            .unwrap();
         assert!(runtime.cache.is_owned(&mine));
         assert!(!runtime.lru_cached().await.iter().any(|o| o.id == mine.id));
     }
@@ -738,10 +790,8 @@ mod tests {
     #[tokio::test]
     async fn owned_objects_are_served_only_once_shared() {
         let _guard = LOCK.lock().unwrap();
-        let base = std::env::temp_dir().join(format!(
-            "canopee_runtime_gate_owned_{}",
-            std::process::id()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("canopee_runtime_gate_owned_{}", std::process::id()));
         let runtime = Runtime::open_with_root(base).await.unwrap();
         let provider = provider_for(&runtime);
 
@@ -807,10 +857,8 @@ mod tests {
     #[tokio::test]
     async fn home_index_share_unshare_roundtrip() {
         let _guard = LOCK.lock().unwrap();
-        let base = std::env::temp_dir().join(format!(
-            "canopee_runtime_home_{}",
-            std::process::id()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("canopee_runtime_home_{}", std::process::id()));
         let runtime = Runtime::open_with_root(base).await.unwrap();
         let provider = provider_for(&runtime);
 
@@ -823,10 +871,7 @@ mod tests {
         );
 
         // Share via home index.
-        runtime
-            .share_object("photo", &id, None)
-            .await
-            .unwrap();
+        runtime.share_object("photo", &id, None).await.unwrap();
         assert!(
             provider.get_object(&id).await.is_some(),
             "must be served after sharing"
@@ -876,10 +921,8 @@ mod tests {
     #[tokio::test]
     async fn save_home_index_reconciles_shared_flags() {
         let _guard = LOCK.lock().unwrap();
-        let base = std::env::temp_dir().join(format!(
-            "canopee_runtime_reconcile_{}",
-            std::process::id()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("canopee_runtime_reconcile_{}", std::process::id()));
         let runtime = Runtime::open_with_root(base).await.unwrap();
 
         let blob = runtime
@@ -924,14 +967,15 @@ mod tests {
     #[tokio::test]
     async fn set_home_entry_shared_flips_flag_and_validates() {
         let _guard = LOCK.lock().unwrap();
-        let base = std::env::temp_dir().join(format!(
-            "canopee_runtime_set_shared_{}",
-            std::process::id()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("canopee_runtime_set_shared_{}", std::process::id()));
         let runtime = Runtime::open_with_root(base).await.unwrap();
 
         // No home index yet.
-        assert!(runtime.set_home_entry_shared("pic.png", true).await.is_err());
+        assert!(runtime
+            .set_home_entry_shared("pic.png", true)
+            .await
+            .is_err());
 
         let blob = runtime
             .put_object(b"pic".to_vec(), ObjectType::Blob, None)
@@ -955,12 +999,18 @@ mod tests {
         // Unknown entry name.
         assert!(runtime.set_home_entry_shared("nope", true).await.is_err());
 
-        runtime.set_home_entry_shared("pic.png", true).await.unwrap();
+        runtime
+            .set_home_entry_shared("pic.png", true)
+            .await
+            .unwrap();
         assert!(runtime.is_shared(&blob.id).await);
         let index = runtime.load_home_index().await.unwrap().unwrap();
         assert!(index.entries[0].shared);
 
-        runtime.set_home_entry_shared("pic.png", false).await.unwrap();
+        runtime
+            .set_home_entry_shared("pic.png", false)
+            .await
+            .unwrap();
         assert!(!runtime.is_shared(&blob.id).await);
         let index = runtime.load_home_index().await.unwrap().unwrap();
         assert!(!index.entries[0].shared);
@@ -978,12 +1028,10 @@ mod tests {
         let provider = provider_for(&runtime);
 
         // Sharing an object that isn't stored locally is an error.
-        assert!(
-            runtime
-                .share_object("ghost", &ObjectId::new("nope"), None)
-                .await
-                .is_err()
-        );
+        assert!(runtime
+            .share_object("ghost", &ObjectId::new("nope"), None)
+            .await
+            .is_err());
 
         let blob = runtime
             .put_object(b"share me".to_vec(), ObjectType::Blob, None)
@@ -1017,14 +1065,20 @@ mod tests {
             .put_object(b"new version".to_vec(), ObjectType::Blob, None)
             .await
             .unwrap();
-        runtime.share_object("file.txt", &blob2.id, None).await.unwrap();
+        runtime
+            .share_object("file.txt", &blob2.id, None)
+            .await
+            .unwrap();
         let index = runtime.load_home_index().await.unwrap().unwrap();
         assert_eq!(index.entries.len(), 1);
         assert_eq!(index.entries[0].object, blob2.id);
         assert!(runtime.is_shared(&blob2.id).await);
 
         // Unsharing withdraws the current object.
-        runtime.set_home_entry_shared("file.txt", false).await.unwrap();
+        runtime
+            .set_home_entry_shared("file.txt", false)
+            .await
+            .unwrap();
         assert!(!runtime.is_shared(&blob2.id).await);
         assert!(
             provider.get_object(&blob2.id).await.is_none(),
@@ -1051,7 +1105,10 @@ mod tests {
         // Sharing under a name must make that name resolvable from the local
         // record cache (the same machine is authoritative instantly — this is
         // the path Bob's `canopee fetch alice <name>` uses).
-        runtime.share_object("summer-mix", &blob.id, None).await.unwrap();
+        runtime
+            .share_object("summer-mix", &blob.id, None)
+            .await
+            .unwrap();
         let record = runtime
             .resolve_pointer(&owner, "entry:summer-mix")
             .await
@@ -1079,10 +1136,8 @@ mod tests {
     #[tokio::test]
     async fn shared_entries_survive_reopen() {
         let _guard = LOCK.lock().unwrap();
-        let base = std::env::temp_dir().join(format!(
-            "canopee_runtime_reopen_{}",
-            std::process::id()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("canopee_runtime_reopen_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
 
         let blob_id = {
@@ -1120,12 +1175,98 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn peers_can_fetch_shared_objects_but_not_private_ones() {
+    async fn concat_requires_at_least_one_object() {
         let _guard = LOCK.lock().unwrap();
         let base = std::env::temp_dir().join(format!(
-            "canopee_runtime_netshare_{}",
+            "canopee_runtime_concat_empty_{}",
             std::process::id()
         ));
+        let runtime = Runtime::open_with_root(base).await.unwrap();
+        assert!(
+            runtime.concat_objects(vec![], None).await.is_err(),
+            "an empty concat must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn concat_combines_payloads_and_replicates_to_connected_peer() {
+        let _guard = LOCK.lock().unwrap();
+        let base =
+            std::env::temp_dir().join(format!("canopee_runtime_concat_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let runtime_a = Runtime::open_with_root(base.join("a")).await.unwrap();
+        let runtime_b = Runtime::open_with_root(base.join("b")).await.unwrap();
+        let peer_a = canopee_network::PeerId::from(runtime_a.identity.keypair().public());
+
+        let first = runtime_a.put(b"one-".to_vec(), None).await.unwrap();
+        let second = runtime_a.put(b"two".to_vec(), None).await.unwrap();
+
+        // Connect B to A and wait until A sees B as a connected peer — the
+        // push targets exactly this set.
+        let addr_a = loop {
+            let addrs = runtime_a.network.listen_addresses().await.unwrap();
+            if let Some(a) = addrs.iter().find(|a| a.to_string().contains("/tcp/")) {
+                break a.clone();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        runtime_b.network.dial(addr_a).await.unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while tokio::time::Instant::now() < deadline {
+            if runtime_a
+                .network
+                .peers()
+                .await
+                .unwrap_or_default()
+                .iter()
+                .any(|p| p.peer_id == runtime_b.device_key.peer_id())
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        let combined = runtime_a
+            .concat_objects(vec![first.clone(), second.clone()], Some("12".into()))
+            .await
+            .unwrap();
+
+        // The concatenation is a real, locally-stored object with the
+        // concatenated payload.
+        let object = runtime_a.get(&combined).await.unwrap();
+        assert_eq!(object.payload.data, b"one-two");
+        assert!(
+            runtime_a.is_shared(&combined).await,
+            "concat result must be shared"
+        );
+
+        // The push landed: B has it in its own store, signature-verified.
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if runtime_b.storage.exists(&combined).await {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for the pushed object to land in B's store");
+        let b_copy = runtime_b.get(&combined).await.unwrap();
+        assert!(b_copy.verify());
+        assert_eq!(b_copy.payload.data, b"one-two");
+        assert!(
+            runtime_b.cache.is_cached(&combined).await,
+            "a pushed foreign object must be marked cached in B"
+        );
+        let _ = peer_a;
+        let _ = (first, second);
+    }
+
+    #[tokio::test]
+    async fn peers_can_fetch_shared_objects_but_not_private_ones() {
+        let _guard = LOCK.lock().unwrap();
+        let base =
+            std::env::temp_dir().join(format!("canopee_runtime_netshare_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let runtime_a = Runtime::open_with_root(base.join("a")).await.unwrap();
         let runtime_b = Runtime::open_with_root(base.join("b")).await.unwrap();

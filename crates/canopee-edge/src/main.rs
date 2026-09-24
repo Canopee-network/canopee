@@ -29,8 +29,8 @@
 //! * `CANOPEE_BOOTSTRAP_ADDRS` — passed through to the network layer
 
 use canopee_edge::httpd;
-use canopee_network::{NetworkManager, ObjectProvider, PeerId};
-use canopee_storage::{ExportBundle, ObjectId};
+use canopee_network::{NetworkManager, ObjectProvider, ObjectStore, PeerId};
+use canopee_storage::{ExportBundle, Object, ObjectId};
 use std::sync::Arc;
 
 /// The edge never hosts content of its own; requests are always forwarded to a
@@ -43,6 +43,18 @@ struct EmptyProvider;
 impl ObjectProvider for EmptyProvider {
     async fn get_object(&self, _id: &ObjectId) -> Option<ExportBundle> {
         None
+    }
+}
+
+/// The edge pushes nothing of its own and hosts no object store, so a peer's
+/// `ObjectRequest::Store` push is refused (the sender treats a relay refusal
+/// as a logged warning, not a failure — see `replicate_object`).
+struct EmptyStore;
+
+#[async_trait::async_trait]
+impl ObjectStore for EmptyStore {
+    async fn put_verified(&self, _object: &Object) -> anyhow::Result<()> {
+        anyhow::bail!("this edge hosts no object store")
     }
 }
 
@@ -101,7 +113,13 @@ async fn main() -> anyhow::Result<()> {
     let listen_addr: canopee_network::Multiaddr =
         format!("/ip4/0.0.0.0/tcp/{listen_port}").parse()?;
 
-    let network = NetworkManager::new(keypair, listen_addr, Arc::new(EmptyProvider), false)?;
+    let network = NetworkManager::new(
+        keypair,
+        listen_addr,
+        Arc::new(EmptyProvider),
+        Arc::new(EmptyStore),
+        false,
+    )?;
 
     let http_port = env_port("CANOPEE_EDGE_HTTP_PORT", 8080);
     let tls_cert = std::env::var("CANOPEE_EDGE_TLS_CERT").ok();

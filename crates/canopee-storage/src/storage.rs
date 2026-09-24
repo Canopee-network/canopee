@@ -38,6 +38,17 @@ impl Storage {
         let path = format!("{}/{}", self.root, id.0);
         let bytes = fs::read(path).await?;
         let object: Object = bincode::deserialize(&bytes)?;
+        // The file path must name the object it holds. A content-addressed id
+        // pins this: an object written under someone else's id (a wrongly
+        // renamed file, or a stale temp surviving a rename) must never be
+        // returned as that other object.
+        if object.id != *id {
+            anyhow::bail!(
+                "Object id mismatch: file holds {}, requested {}",
+                object.id,
+                id
+            );
+        }
         if !object.verify() {
             anyhow::bail!("Invalid signature for object {}", id);
         }

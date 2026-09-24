@@ -30,7 +30,9 @@ pub fn open_browser(url: &str) {
     let _ = url; // unsupported platform: nothing to open
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    tokio::spawn(async move { let _ = cmd.spawn(); });
+    tokio::spawn(async move {
+        let _ = cmd.spawn();
+    });
     #[cfg(target_os = "windows")]
     let _ = cmd.spawn();
 }
@@ -100,10 +102,7 @@ pub async fn publish_directory(
 /// and returns those with no matching published asset path. A non-root build
 /// base makes the HTML point at e.g. `/my-app/assets/x.js` while
 /// `publish_directory` only publishes `/assets/x.js`.
-fn unpublished_asset_references(
-    html: &str,
-    assets: &HashMap<String, ObjectId>,
-) -> Vec<String> {
+fn unpublished_asset_references(html: &str, assets: &HashMap<String, ObjectId>) -> Vec<String> {
     let mut missing = Vec::new();
     for value in find_absolute_urls(html) {
         let key = value
@@ -128,9 +127,7 @@ fn find_absolute_urls(html: &str) -> Vec<String> {
             let after_attr = &rest[rel + attr.len()..];
             // Skip quoted/unquoted: bundlers emit `src="/..."`; handle a
             // leading quote char if present.
-            let after_quote = after_attr
-                .strip_prefix(['"', '\''])
-                .unwrap_or(after_attr);
+            let after_quote = after_attr.strip_prefix(['"', '\'']).unwrap_or(after_attr);
             let value = after_quote
                 .split(|c: char| c == '"' || c == '\'' || c == '>' || c.is_whitespace())
                 .next()
@@ -255,7 +252,11 @@ const MIN_COMPRESSIBLE_LEN: usize = 256;
 /// asks to close), `Range` single-range requests, `gzip` content encoding for
 /// compressible types, `HEAD` with headers but no body, and `ETag` + 304
 /// conditional revalidation.
-pub async fn serve(files: HashMap<String, Vec<u8>>, port: u16, open_browser: bool) -> anyhow::Result<()> {
+pub async fn serve(
+    files: HashMap<String, Vec<u8>>,
+    port: u16,
+    open_browser: bool,
+) -> anyhow::Result<()> {
     let etags = compute_etags(&files);
     serve_loop(files, etags, port, open_browser).await
 }
@@ -335,7 +336,9 @@ struct Request {
 
 /// Reads one request (request line + headers) from the connection. Returns
 /// `Ok(None)` on EOF or on an idle timeout, meaning the connection is done.
-async fn read_request(reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>) -> std::io::Result<Option<Request>> {
+async fn read_request(
+    reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+) -> std::io::Result<Option<Request>> {
     loop {
         let mut request_line = String::new();
         let Some(n) = read_with_timeout(reader, &mut request_line).await? else {
@@ -439,7 +442,11 @@ fn prepare_response(
     // requested route — so a fallback to the entrypoint gets `text/html`
     // even though the browser asked for `/about`.
     let content_type = guess_content_type(served_key);
-    let connection = if request.close_after_response { "close" } else { "keep-alive" };
+    let connection = if request.close_after_response {
+        "close"
+    } else {
+        "keep-alive"
+    };
 
     // Conditional GET/HEAD: if the client already holds the representation,
     // answer 304 with no body. Evaluated before Range, per RFC 7232 §6 — a
@@ -470,7 +477,10 @@ fn prepare_response(
     let send_body = request.method == "GET";
 
     let Some(body) = found else {
-        return (error_response("404 Not Found", content_type, connection, 0), None);
+        return (
+            error_response("404 Not Found", content_type, connection, 0),
+            None,
+        );
     };
     let body_len = body.len();
 
@@ -505,7 +515,9 @@ fn prepare_response(
                         connection,
                     );
                     header.push_str("Accept-Ranges: bytes\r\n");
-                    header.push_str(&format!("Content-Range: bytes {start}-{end}/{body_len}\r\n"));
+                    header.push_str(&format!(
+                        "Content-Range: bytes {start}-{end}/{body_len}\r\n"
+                    ));
                     if let Some(etag) = etags.get(served_key) {
                         header.push_str(&format!("ETag: \"{etag}\"\r\n"));
                     }
@@ -552,7 +564,11 @@ fn prepare_response(
     }
     header.push_str("\r\n");
 
-    let body = if send_body { Some(payload.to_vec()) } else { None };
+    let body = if send_body {
+        Some(payload.to_vec())
+    } else {
+        None
+    };
     (header, body)
 }
 
@@ -737,10 +753,16 @@ mod tests {
     fn sample_files() -> HashMap<String, Vec<u8>> {
         let mut files = HashMap::new();
         files.insert("/".to_string(), b"<div id=root>app</div>".to_vec());
-        files.insert("/style.css".to_string(), format!("h1{{color:red}}/*{}*/", "a".repeat(500)).into_bytes());
+        files.insert(
+            "/style.css".to_string(),
+            format!("h1{{color:red}}/*{}*/", "a".repeat(500)).into_bytes(),
+        );
         files.insert("/assets/app.js".to_string(), b"console.log('hi')".to_vec());
         files.insert("/video.mp4".to_string(), (0..10u8).collect());
-        files.insert("/img.png".to_string(), std::iter::repeat_n(b'\xff', 512).collect());
+        files.insert(
+            "/img.png".to_string(),
+            std::iter::repeat_n(b'\xff', 512).collect(),
+        );
         files
     }
 
@@ -762,9 +784,15 @@ mod tests {
 
         // Route-shaped path missing from `files` -> served the entrypoint.
         let (status, content_type, body) = http_request_with_ct(&addr, "/about").await;
-        assert!(status.contains(" 200 "), "route should fall back to index: {status}");
+        assert!(
+            status.contains(" 200 "),
+            "route should fall back to index: {status}"
+        );
         assert!(body.contains("app"));
-        assert!(content_type.starts_with("text/html"), "fallback body must be marked html, got {content_type}");
+        assert!(
+            content_type.starts_with("text/html"),
+            "fallback body must be marked html, got {content_type}"
+        );
 
         // Nested route with a query string.
         let (status, body) = http_request(&addr, "/users/42?tab=posts").await;
@@ -774,7 +802,10 @@ mod tests {
         // Missing *asset-looking* path stays a real 404.
         let (status, _content_type, _body) =
             http_request_with_ct(&addr, "/assets/does-not-exist.js").await;
-        assert!(status.contains(" 404 "), "missing asset must not silently fall back");
+        assert!(
+            status.contains(" 404 "),
+            "missing asset must not silently fall back"
+        );
     }
 
     #[tokio::test]
@@ -782,26 +813,46 @@ mod tests {
         let addr = spawn_server(sample_files()).await;
 
         // `bytes=A-B`: inclusive both ends.
-        let (status, headers, body) =
-            http_request_full(&addr, "GET", "/video.mp4", &[("Range", "bytes=2-4"), ("Connection", "close")]).await;
+        let (status, headers, body) = http_request_full(
+            &addr,
+            "GET",
+            "/video.mp4",
+            &[("Range", "bytes=2-4"), ("Connection", "close")],
+        )
+        .await;
         assert!(status.contains(" 206 "), "got {status}");
         assert_eq!(headers["content-range"], "bytes 2-4/10");
         assert_eq!(body, vec![2, 3, 4]);
 
         // `bytes=A-`: to the end of the file.
-        let (_status, _headers, body) =
-            http_request_full(&addr, "GET", "/video.mp4", &[("Range", "bytes=7-"), ("Connection", "close")]).await;
+        let (_status, _headers, body) = http_request_full(
+            &addr,
+            "GET",
+            "/video.mp4",
+            &[("Range", "bytes=7-"), ("Connection", "close")],
+        )
+        .await;
         assert_eq!(body, vec![7, 8, 9]);
 
         // `bytes=-N`: the last N bytes.
-        let (_status, headers, body) =
-            http_request_full(&addr, "GET", "/video.mp4", &[("Range", "bytes=-4"), ("Connection", "close")]).await;
+        let (_status, headers, body) = http_request_full(
+            &addr,
+            "GET",
+            "/video.mp4",
+            &[("Range", "bytes=-4"), ("Connection", "close")],
+        )
+        .await;
         assert_eq!(headers["content-range"], "bytes 6-9/10");
         assert_eq!(body, vec![6, 7, 8, 9]);
 
         // Unsatisfiable range -> 416 with a byte *unknown* size.
-        let (status, headers, _body) =
-            http_request_full(&addr, "GET", "/video.mp4", &[("Range", "bytes=20-"), ("Connection", "close")]).await;
+        let (status, headers, _body) = http_request_full(
+            &addr,
+            "GET",
+            "/video.mp4",
+            &[("Range", "bytes=20-"), ("Connection", "close")],
+        )
+        .await;
         assert!(status.contains(" 416 "), "got {status}");
         assert_eq!(headers["content-range"], "bytes */10");
 
@@ -846,8 +897,14 @@ mod tests {
             &[("Accept-Encoding", "gzip"), ("Connection", "close")],
         )
         .await;
-        assert!(!headers.contains_key("content-encoding"), "png must not be gzipped");
-        assert!(!headers.contains_key("vary"), "png must not advertise gzip variants");
+        assert!(
+            !headers.contains_key("content-encoding"),
+            "png must not be gzipped"
+        );
+        assert!(
+            !headers.contains_key("vary"),
+            "png must not advertise gzip variants"
+        );
     }
 
     #[tokio::test]
@@ -982,7 +1039,10 @@ mod tests {
             </html>
         "#;
         let published = vec![
-            ("/assets/index-a1b2c3.js".to_string(), ObjectId::new("/assets/index-a1b2c3.js")),
+            (
+                "/assets/index-a1b2c3.js".to_string(),
+                ObjectId::new("/assets/index-a1b2c3.js"),
+            ),
             ("/favicon.ico".to_string(), ObjectId::new("/favicon.ico")),
         ]
         .into_iter()
@@ -1072,7 +1132,8 @@ mod tests {
     }
 
     async fn http_request(addr: &std::net::SocketAddr, path: &str) -> (String, String) {
-        let (status, _, body) = http_request_full(addr, "GET", path, &[("Connection", "close")]).await;
+        let (status, _, body) =
+            http_request_full(addr, "GET", path, &[("Connection", "close")]).await;
         (status, String::from_utf8_lossy(&body).to_string())
     }
 
@@ -1083,6 +1144,10 @@ mod tests {
         let (status, headers, body) =
             http_request_full(addr, "GET", path, &[("Connection", "close")]).await;
         let content_type = headers.get("content-type").cloned().unwrap_or_default();
-        (status, content_type, String::from_utf8_lossy(&body).to_string())
+        (
+            status,
+            content_type,
+            String::from_utf8_lossy(&body).to_string(),
+        )
     }
 }

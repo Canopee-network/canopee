@@ -5,13 +5,26 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum ObjectRequest {
+    /// Pull: ask a peer for an object it holds. Served from the node's
+    /// `ObjectProvider` (shared/cached objects only).
     GetObject(ObjectId),
+    /// Push: hand a peer an `ExportBundle` to store, so a freshly created
+    /// object lands in already-connected peers' stores *without* a DHT
+    /// provider round-trip. The receiver verifies the signature
+    /// (`put_verified`) before persisting; see [`ObjectResponse::Stored`].
+    Store(ExportBundle),
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum ObjectResponse {
     Object(ExportBundle),
     NotFound,
+    /// The receiver verified and stored a pushed [`ObjectRequest::Store`]
+    /// bundle in its own store.
+    Stored,
+    /// The receiver refused a pushed bundle (invalid signature, unwritable
+    /// store, ...). The message describes why.
+    StoreFailed(String),
 }
 
 /// The LAN device-pairing request: the source device (existing identity)
@@ -101,14 +114,9 @@ pub struct ServeRegistration {
 impl ServeRegistration {
     /// Signs a fresh registration for `app_id` (a manifest object id) with
     /// `identity`.
-    pub fn sign(
-        identity: &Identity,
-        app_id: &str,
-        timestamp: u64,
-    ) -> anyhow::Result<Self> {
+    pub fn sign(identity: &Identity, app_id: &str, timestamp: u64) -> anyhow::Result<Self> {
         let identity_id = identity.id().clone();
-        let signature =
-            identity.sign(&Self::signing_bytes(app_id, &identity_id, timestamp))?;
+        let signature = identity.sign(&Self::signing_bytes(app_id, &identity_id, timestamp))?;
         Ok(Self {
             app_id: app_id.to_string(),
             identity: identity_id,
@@ -167,7 +175,9 @@ mod tests {
 
     #[tokio::test]
     async fn serve_registration_signs_and_verifies() {
-        let identity = Identity::create("/tmp/canopee_serve_reg_a.key").await.unwrap();
+        let identity = Identity::create("/tmp/canopee_serve_reg_a.key")
+            .await
+            .unwrap();
         let timestamp = 1_700_000_000;
         let registration = ServeRegistration::sign(&identity, "deadbeef", timestamp).unwrap();
 
@@ -177,17 +187,24 @@ mod tests {
 
     #[tokio::test]
     async fn serve_registration_rejects_tampering() {
-        let identity = Identity::create("/tmp/canopee_serve_reg_b.key").await.unwrap();
+        let identity = Identity::create("/tmp/canopee_serve_reg_b.key")
+            .await
+            .unwrap();
         let mut registration =
             ServeRegistration::sign(&identity, "deadbeef", 1_700_000_000).unwrap();
 
         registration.app_id = "cafebabe".to_string();
         assert!(!registration.verify());
 
-        let other = Identity::create("/tmp/canopee_serve_reg_c.key").await.unwrap();
+        let other = Identity::create("/tmp/canopee_serve_reg_c.key")
+            .await
+            .unwrap();
         let mut forged = ServeRegistration::sign(&other, "deadbeef", 1_700_000_000).unwrap();
         forged.identity = registration.identity.clone();
-        assert!(!forged.verify(), "an identity signing another's id must fail");
+        assert!(
+            !forged.verify(),
+            "an identity signing another's id must fail"
+        );
     }
 
     #[test]

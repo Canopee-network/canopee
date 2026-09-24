@@ -1,9 +1,9 @@
 use crate::Runtime;
-use canopee_storage::{
-    Capability, CapabilityEntry, CapabilityId, CapabilityIndex, Permission, RECORD_CAPABILITIES,
-    Resource,
-};
 use canopee_identity::IdentityId;
+use canopee_storage::{
+    Capability, CapabilityEntry, CapabilityId, CapabilityIndex, Permission, Resource,
+    RECORD_CAPABILITIES,
+};
 use time::OffsetDateTime;
 
 impl Runtime {
@@ -17,20 +17,18 @@ impl Runtime {
         permissions: Vec<Permission>,
         expires_at: Option<u64>,
     ) -> anyhow::Result<Capability> {
-        let capability = Capability::issue(
-            &self.identity,
-            subject,
-            resource,
-            permissions,
-            expires_at,
-        )?;
+        let capability =
+            Capability::issue(&self.identity, subject, resource, permissions, expires_at)?;
         let object = capability.to_object(&self.identity)?;
         self.storage.put_verified(&object).await?;
 
-        let mut index = self.load_capability_index().await?.unwrap_or(CapabilityIndex {
-            entries: vec![],
-            version: 0,
-        });
+        let mut index = self
+            .load_capability_index()
+            .await?
+            .unwrap_or(CapabilityIndex {
+                entries: vec![],
+                version: 0,
+            });
         index.entries.push(CapabilityEntry {
             capability: capability.clone(),
             revoked: false,
@@ -45,7 +43,9 @@ impl Runtime {
         let object = self
             .resolve_owner_object(self.identity.id(), RECORD_CAPABILITIES)
             .await?;
-        let Some(object) = object else { return Ok(None) };
+        let Some(object) = object else {
+            return Ok(None);
+        };
         Ok(Some(object.decode()?))
     }
 
@@ -57,7 +57,8 @@ impl Runtime {
         let object = index.to_object(&self.identity)?;
         let id = object.id.clone();
         self.storage.put_verified(&object).await?;
-        self.publish_pointer(RECORD_CAPABILITIES, id.clone()).await?;
+        self.publish_pointer(RECORD_CAPABILITIES, id.clone())
+            .await?;
         Ok(id)
     }
 
@@ -86,7 +87,10 @@ impl Runtime {
 
     /// Verifies a presented capability end to end: signature + content id +
     /// issuer derivation, time window, and revocation check (best-effort).
-    pub async fn check_capability(&self, capability: &Capability) -> anyhow::Result<(bool, String)> {
+    pub async fn check_capability(
+        &self,
+        capability: &Capability,
+    ) -> anyhow::Result<(bool, String)> {
         let now = OffsetDateTime::now_utc().unix_timestamp().max(0) as u64;
         if !capability.verify() {
             return Ok((false, "signature or content id invalid".to_string()));
@@ -103,11 +107,7 @@ impl Runtime {
         let revoked = if capability.issuer == *self.identity.id() {
             self.load_capability_index()
                 .await?
-                .and_then(|index| {
-                    index
-                        .by_id(&capability.id)
-                        .map(|entry| entry.revoked)
-                })
+                .and_then(|index| index.by_id(&capability.id).map(|entry| entry.revoked))
                 .unwrap_or(false)
         } else {
             self.check_remote_revocation(&capability.issuer, &capability.id)
