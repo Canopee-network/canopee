@@ -42,7 +42,19 @@ fn relay_peer_id_from_circuit_addr(addr: &Multiaddr) -> Option<PeerId> {
 /// discovery takes over. The default relay also runs the edge role, so this
 /// is the default edge for `canopee publish`.
 pub const DEFAULT_BOOTSTRAP_ADDRS: &[&str] =
-    &["/ip4/89.127.234.35/tcp/4001/p2p/12D3KooWGiPk75fg8HBW7WJCouTTTLNi8W3s48sBK8AKewZKbCjC"];
+    &["/ip4/89.127.234.35/tcp/4001/p2p/12D3KooWEHGyyuEeLxfgmBPnutrCcz93nEmMswjuWcfhxBvxjbng"];
+
+/// Whether a fresh node automatically makes itself reachable via its
+/// bootstrap relays (one circuit reservation per bootstrap address), so
+/// NAT'd nodes are dialable through the relay without a manual
+/// `canopee listen-via-relay`. On by default; set `CANOPEE_AUTO_RELAY=0`
+/// (also `false`, `no`, `off`) to disable.
+fn auto_relay() -> bool {
+    match std::env::var("CANOPEE_AUTO_RELAY").ok().as_deref() {
+        Some("0") | Some("false") | Some("no") | Some("off") => false,
+        _ => true,
+    }
+}
 
 /// Returns the list of bootstrap multiaddrs to dial at startup.
 ///
@@ -340,9 +352,23 @@ impl NetworkManager {
         if !bootstrap.is_empty() {
             tracing::info!("Dialing {} bootstrap address(es)", bootstrap.len());
         }
-        for addr in bootstrap {
+        for addr in &bootstrap {
             if let Err(e) = swarm.dial(addr.clone()) {
                 tracing::warn!("Failed to dial bootstrap {addr}: {e}");
+            }
+        }
+
+        // make this node reachable *through* its bootstrap relays: a circuit
+        // reservation on each `.../p2p/<relay>/p2p-circuit` address means a
+        // NAT'd node can be dialed via the relay (and dcutr then upgrades the
+        // relayed path to a direct connection when possible) with zero manual
+        // `listen-via-relay`. Disable with CANOPEE_AUTO_RELAY=0.
+        if auto_relay() {
+            for addr in &bootstrap {
+                let circuit_addr = addr.clone().with(Protocol::P2pCircuit);
+                if let Err(e) = swarm.listen_on(circuit_addr.clone()) {
+                    tracing::warn!("Failed to listen via relay {circuit_addr}: {e}");
+                }
             }
         }
 
@@ -736,6 +762,26 @@ mod tests {
                 assert!(addrs[0].starts_with("/ip4/127.0.0.1/tcp/9999"));
             },
         );
+    }
+
+    #[test]
+    fn auto_relay_enabled_by_default() {
+        let _guard = LOCK.lock().unwrap();
+        clear_bootstrap_env();
+        with_env("CANOPEE_AUTO_RELAY", None::<&str>, || {
+            assert!(auto_relay(), "auto relay reservation must be on by default");
+        });
+    }
+
+    #[test]
+    fn auto_relay_respects_off_values() {
+        let _guard = LOCK.lock().unwrap();
+        clear_bootstrap_env();
+        for value in ["0", "false", "no", "off"] {
+            with_env("CANOPEE_AUTO_RELAY", Some(value), || {
+                assert!(!auto_relay(), "CANOPEE_AUTO_RELAY={value} must disable auto relay");
+            });
+        }
     }
 }
 

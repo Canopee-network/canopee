@@ -1,0 +1,58 @@
+name: Relay deploy
+
+# Builds canopee-node + canopee-cli and deploys the public bootstrap/relay
+# node to the VPS using scripts/deploy-relay.sh — the same one-command script
+# you run locally, now on a trigger. Configure the box in GitHub secrets:
+#
+#   RELAY_HOST      (e.g. 89.127.234.35)
+#   RELAY_SSH_USER  (e.g. root)
+#   RELAY_SSH_KEY   (private key, multi-line OK)
+#
+# See deploy/README.md → "One-command reproducible deploy".
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - 'crates/canopee-node/**'
+      - 'crates/canopee-cli/**'
+      - 'crates/canopee-edge/**'
+      - 'crates/canopee-network/**'
+      - 'crates/canopee-runtime/**'
+      - 'crates/canopee-config/**'
+      - 'crates/canopee-protocol/**'
+      - 'deploy/**'
+      - 'scripts/deploy-relay.sh'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (x86_64 musl target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl linker
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Set up SSH key
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.RELAY_SSH_KEY }}" > ~/.ssh/canopee_deploy
+          chmod 600 ~/.ssh/canopee_deploy
+          ssh-keyscan -H ${{ secrets.RELAY_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Deploy relay (scripts/deploy-relay.sh)
+        env:
+          RELAY_HOST: ${{ secrets.RELAY_HOST }}
+          RELAY_SSH_USER: ${{ secrets.RELAY_SSH_USER }}
+        run: |
+          export RELAY_SSH_KEY="$HOME/.ssh/canopee_deploy"
+          scripts/deploy-relay.sh --targets linux-x86_64

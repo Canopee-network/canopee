@@ -4,7 +4,11 @@ mod commands;
 mod uri;
 
 #[derive(Parser)]
-#[command(name = "canopee")]
+#[command(
+    name = "canopee",
+    version = env!("CANOPEE_BUILD_VERSION"),
+    about = "Canopee — own your identity, data, apps and infrastructure"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

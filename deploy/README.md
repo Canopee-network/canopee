@@ -10,6 +10,35 @@ Two systemd units:
   stores nothing), for operators who want the gateway as a separate process
   (see the edge section at the end). Not needed for a normal relay.
 
+## One-command reproducible deploy
+
+`scripts/deploy-relay.sh` builds the node + CLI for every target, installs
+them on the VPS, (re)installs the systemd unit, restarts the service and
+verifies health — all idempotent, run it again to update:
+
+```bash
+scripts/deploy-relay.sh            # uses the defaults below
+RELAY_HOST=<vps-ip> scripts/deploy-relay.sh   # override anything
+```
+
+Defaults (override via env): `RELAY_HOST=89.127.234.35`,
+`RELAY_SSH_USER=root`, `RELAY_SSH_KEY=~/.ssh/1984-root`,
+`RELAY_USER=canopee`, `RELAY_DIR=/home/canopee/canopee`,
+`RELAY_LISTEN_PORT=4001`.
+
+The same script backs CI/CD (`.github/workflows/relay-deploy.yml` runs it on
+push to `master` for relay-relevant paths, and manually via *Actions →
+Relay deploy → Run workflow*). Both paths:
+
+1. build the release binaries (native macOS-arm64 for local testing, plus
+   statically-linked `x86_64`/`aarch64` Linux musl for any VPS),
+2. refresh `_binaries/` with the freshly built artifacts,
+3. check the remote has ≥1 GiB free before touching anything,
+4. stage + atomically replace the binaries and unit on the box,
+5. `systemctl restart canopee-node` and verify: active, `:4001` listening,
+   identity + peer id printed, edge answering on `:8080`, and the deployed
+   `--version` (the git SHA) matches the checkout.
+
 ## Deploying a relay node
 
 Installs `canopee-node` as a systemd service listening on a fixed TCP port,

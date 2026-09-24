@@ -80,10 +80,12 @@ impl Node {
         }
         let listener = UnixListener::bind(&socket_path)?;
         println!("Canopee node listening on {:?}", socket_path);
-        start_edge_role(self.runtime.network.clone()).await;
+        tokio::spawn(start_edge_role(self.runtime.network.clone()));
         let mut shutdown = self.shutdown.subscribe();
         let mut tasks: JoinSet<()> = JoinSet::new();
-        self.runtime.mark_started().await?;
+        if let Err(e) = self.runtime.mark_started().await {
+            eprintln!("warning: could not mark node started: {e}");
+        }
         let cap = cache_cap_bytes();
         let mut sweep = tokio::time::interval(std::time::Duration::from_secs(30));
 

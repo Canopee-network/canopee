@@ -20,11 +20,14 @@ single entry (in `bootstrap_addrs()` in
 `crates/canopee-network/src/manager.rs`):
 
 ```
-/ip4/89.127.234.35/tcp/4001/p2p/12D3KooWGiPk75fg8HBW7WJCouTTTLNi8W3s48sBK8AKewZKbCjC
+/ip4/89.127.234.35/tcp/4001/p2p/12D3KooWEHGyyuEeLxfgmBPnutrCcz93nEmMswjuWcfhxBvxjbng
 ```
 
 After connecting, the existing `ConnectionEstablished` handler registers the
-peer with Kademlia automatically — nothing extra to wire.
+peer with Kademlia automatically — nothing extra to wire. And since
+`canopee-network` now requests a circuit reservation on each bootstrap relay
+by default (see `CANOPEE_AUTO_RELAY`), a NAT'd node is *also* reachable
+through the relay without running `listen-via-relay` by hand.
 
 ## Run your own relay
 

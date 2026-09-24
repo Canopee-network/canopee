@@ -41,7 +41,7 @@ when the node starts. Unset by default (plaintext key file).
 
 Replaces the default bootstrap address list (comma-separated multiaddrs).
 The default is the single public relay
-`/ip4/89.127.234.35/tcp/4001/p2p/12D3KooWGiPk75fg8HBW7WJCouTTTLNi8W3s48sBK8AKewZKbCjC`.
+`/ip4/89.127.234.35/tcp/4001/p2p/12D3KooWEHGyyuEeLxfgmBPnutrCcz93nEmMswjuWcfhxBvxjbng`.
 Point this at your own relay (see [Deployment](deployment.md)) to run a
 private network.
 
@@ -49,6 +49,14 @@ private network.
 
 Multiaddrs to add **before** the defaults — bootstrap your own relay *and*
 keep the public one as a backstop.
+
+## `CANOPEE_AUTO_RELAY`
+
+Whether a fresh node automatically asks its bootstrap relays for a circuit
+reservation on startup (so it is reachable through the relay, and dcutr can
+upgrade the path to a direct connection later). Accepts `0`, `false`, `no`,
+`off` to disable; anything else (or unset) enables it. Default: **enabled**.
+Disable for embedded/app-root nodes that should never reserve relay circuits.
 
 ## `CANOPEE_EDGE_ADDR`
 
