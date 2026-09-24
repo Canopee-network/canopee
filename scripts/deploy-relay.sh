@@ -211,7 +211,7 @@ printf '  listening :%-5s    : ' "$RELAY_LISTEN_PORT"; ssh_run "ss -ltn | grep -
 printf '  edge http :8080    : '; ssh_run "curl -skm5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/" || printf 'down'
 echo
 printf '  deployed version    : '; ssh_run "$RELAY_BIN_DIR/canopee-node --version"
-printf '  local   version     : canopee-node  (built from ${local_sha})\n'
+printf '  local   version     : canopee-node  (built from %s)\n' "$local_sha"
 printf '  identity           : '; ssh_run "cd -P '$RELAY_DIR/..'; '$RELAY_BIN_DIR/canopee-cli' identity 2>/dev/null || sudo -u '$RELAY_USER' '$RELAY_BIN_DIR/canopee-cli' identity"
 printf '  device peer id     : '; ssh_run "sudo -u '$RELAY_USER' '$RELAY_BIN_DIR/canopee-cli' device 2>/dev/null" | head -1
 echo
