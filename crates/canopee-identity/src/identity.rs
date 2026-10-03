@@ -260,7 +260,8 @@ impl Identity {
 ///   salt                    [u8; 16]
 ///   nonce                   [u8; 24]
 ///   ciphertext || tag       (rest of file; keypair protobuf + 16-byte Poly1305 tag)
-const HEADER_LEN: usize = ENCRYPTED_MAGIC.len() + ENCRYPTED_VERSION.len() + 3 * 4 + SALT_LEN + NONCE_LEN;
+const HEADER_LEN: usize =
+    ENCRYPTED_MAGIC.len() + ENCRYPTED_VERSION.len() + 3 * 4 + SALT_LEN + NONCE_LEN;
 
 fn is_encrypted_envelope(bytes: &[u8]) -> bool {
     bytes.len() > HEADER_LEN && bytes[..ENCRYPTED_MAGIC.len()] == *ENCRYPTED_MAGIC
@@ -346,13 +347,26 @@ fn derive_dh_secret(signing_key: &Keypair) -> DhSecret {
     DhSecret::from(seed)
 }
 
+/// The X25519 secret derived from `signing_key`, for the object-encryption
+/// envelope in [`crate::envelope`]. The Ed25519 key is the single root of
+/// trust, so this must stay the one place the DH secret is materialized.
+pub(crate) fn dh_secret_for(signing_key: &Keypair) -> [u8; 32] {
+    derive_dh_secret(signing_key).to_bytes()
+}
+
 #[tokio::test]
 async fn create_if_absent_makes_one_identity_per_path() {
     let path = "./create_if_absent.key";
     let _ = std::fs::remove_file(path);
 
     let first = Identity::create_if_absent(path).await.unwrap();
-    assert_eq!(first.id().to_string(), format!("canopee://identity/{}", first.keypair().public().to_peer_id()));
+    assert_eq!(
+        first.id().to_string(),
+        format!(
+            "canopee://identity/{}",
+            first.keypair().public().to_peer_id()
+        )
+    );
 
     // A second call must adopt the existing key, never mint a new one.
     let second = Identity::create_if_absent(path).await.unwrap();
@@ -369,7 +383,11 @@ async fn create_if_absent_survives_concurrent_first_run() {
     for _ in 0..8 {
         let path = path.to_string();
         handles.push(tokio::spawn(async move {
-            Identity::create_if_absent(&path).await.unwrap().id().clone()
+            Identity::create_if_absent(&path)
+                .await
+                .unwrap()
+                .id()
+                .clone()
         }));
     }
     let mut ids: Vec<_> = Vec::new();
@@ -419,10 +437,14 @@ async fn encrypted_identity_round_trips_through_disk() {
     let id = identity.id().clone();
     let dh = identity.dh_public_key();
 
-    let (loaded, encrypted_at_rest) =
-        Identity::load_encrypted("./enc_roundtrip.key", passphrase).await.unwrap();
+    let (loaded, encrypted_at_rest) = Identity::load_encrypted("./enc_roundtrip.key", passphrase)
+        .await
+        .unwrap();
 
-    assert!(encrypted_at_rest, "file should be detected as encrypted-at-rest");
+    assert!(
+        encrypted_at_rest,
+        "file should be detected as encrypted-at-rest"
+    );
     assert_eq!(loaded.id(), &id);
     assert_eq!(loaded.dh_public_key(), dh);
 }
@@ -462,10 +484,14 @@ async fn load_encrypted_falls_back_to_plaintext_file() {
     let plain = Identity::create("./enc_fallback.key").await.unwrap();
     let id = plain.id().clone();
 
-    let (loaded, encrypted_at_rest) =
-        Identity::load_encrypted("./enc_fallback.key", "irrelevant").await.unwrap();
+    let (loaded, encrypted_at_rest) = Identity::load_encrypted("./enc_fallback.key", "irrelevant")
+        .await
+        .unwrap();
 
-    assert!(!encrypted_at_rest, "plaintext identity must not be flagged encrypted");
+    assert!(
+        !encrypted_at_rest,
+        "plaintext identity must not be flagged encrypted"
+    );
     assert_eq!(loaded.id(), &id);
 }
 
@@ -479,11 +505,17 @@ async fn encrypted_key_material_differs_from_plaintext() {
     let enc_bytes = std::fs::read("./enc_diff.key").unwrap();
     let plain_bytes = std::fs::read("./enc_diff_plain.key").unwrap();
 
-    assert_ne!(enc_bytes, plain_bytes, "encrypted file must not equal plaintext bytes");
+    assert_ne!(
+        enc_bytes, plain_bytes,
+        "encrypted file must not equal plaintext bytes"
+    );
 
     // The Identity debug output must not reveal the signing key material.
     let debug_enc = format!("{enc:?}");
-    assert!(!debug_enc.contains("signing_key"), "Debug must redact the signing key");
+    assert!(
+        !debug_enc.contains("signing_key"),
+        "Debug must redact the signing key"
+    );
     let _ = plain.keypair();
 }
 
@@ -503,7 +535,10 @@ async fn exported_identity_round_trips_through_encrypted_bytes() {
     let imported = Identity::import_from_encrypted(&bytes, "transfer secret").unwrap();
     assert_eq!(imported.id(), &id);
     assert_eq!(imported.dh_public_key(), dh);
-    assert_eq!(imported.export_bytes().unwrap(), identity.export_bytes().unwrap());
+    assert_eq!(
+        imported.export_bytes().unwrap(),
+        identity.export_bytes().unwrap()
+    );
 }
 
 #[tokio::test]

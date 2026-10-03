@@ -1,5 +1,4 @@
 use canopee_protocol::{NodeCommand, NodeResponse};
-use canopee_sdk::{CanopeeClient, NodeClient};
 use canopee_storage::ObjectId;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -9,7 +8,7 @@ use super::common::{
 };
 
 pub(crate) async fn dial(addr: String) {
-    let client = NodeClient::new().await.unwrap();
+    let client = super::common::node_or_exit().await;
     let response = client.request(NodeCommand::Dial { addr }).await.unwrap();
 
     match response {
@@ -20,7 +19,7 @@ pub(crate) async fn dial(addr: String) {
 }
 
 pub(crate) async fn listen_via_relay(relay_addr: String) {
-    let client = NodeClient::new().await.unwrap();
+    let client = super::common::node_or_exit().await;
     let response = client
         .request(NodeCommand::ListenViaRelay { relay_addr })
         .await
@@ -34,7 +33,7 @@ pub(crate) async fn listen_via_relay(relay_addr: String) {
 }
 
 pub(crate) async fn peers() {
-    let client = CanopeeClient::connect().await.unwrap();
+    let client = super::common::client_or_exit().await;
     match client.peers().await {
         Ok(peers) => {
             if peers.is_empty() {
@@ -64,7 +63,7 @@ pub(crate) async fn peers() {
 }
 
 pub(crate) async fn relay_status() {
-    let client = NodeClient::new().await.unwrap();
+    let client = super::common::node_or_exit().await;
     let response = client
         .request(NodeCommand::RelayReservations)
         .await
@@ -93,7 +92,7 @@ pub(crate) async fn relay_status() {
 }
 
 pub(crate) async fn announce(id: String, ids: bool) {
-    let client = CanopeeClient::connect().await.unwrap();
+    let client = super::common::client_or_exit().await;
     let (object_id, name) = match resolve_object_arg(&client, &id).await {
         Ok(resolved) => resolved,
         Err(e) => {
@@ -118,7 +117,7 @@ pub(crate) async fn announce(id: String, ids: bool) {
 }
 
 pub(crate) async fn find_providers(id: String) {
-    let client = CanopeeClient::connect().await.unwrap();
+    let client = super::common::client_or_exit().await;
     let (object_id, name) = match resolve_object_arg(&client, &id).await {
         Ok(resolved) => resolved,
         Err(e) => {
@@ -143,7 +142,7 @@ pub(crate) async fn find_providers(id: String) {
 }
 
 pub(crate) async fn publish(topic: String, message: String) {
-    let client = NodeClient::new().await.unwrap();
+    let client = super::common::node_or_exit().await;
     let response = client
         .request(NodeCommand::Publish {
             topic,
@@ -160,7 +159,7 @@ pub(crate) async fn publish(topic: String, message: String) {
 }
 
 pub(crate) async fn fetch(peer_id: String, id: String, ids: bool) {
-    let client = CanopeeClient::connect().await.unwrap();
+    let client = super::common::client_or_exit().await;
     if looks_like_id(&id) {
         match resolve_peer_arg(&client, &peer_id).await {
             Ok(peer_id) => {
@@ -231,7 +230,7 @@ pub(crate) async fn fetch(peer_id: String, id: String, ids: bool) {
 }
 
 pub(crate) async fn chat(topic: String) {
-    let client = CanopeeClient::connect().await.unwrap();
+    let client = super::common::client_or_exit().await;
     // Resolve connected peers' friendly names up front so incoming
     // messages display as names rather than raw peer ids. Best-effort:
     // unknown senders fall back to a shortened peer id.

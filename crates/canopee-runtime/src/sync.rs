@@ -34,6 +34,13 @@ impl Runtime {
                     Ok(_) => {}
                     Err(e) => tracing::warn!("periodic sync failed: {e}"),
                 }
+                // Converge the device list too. Registration happens at boot
+                // and at pairing, so without this a device that joins while
+                // the others are running never shows up in `canopee devices`
+                // (or the tray's Devices tab) until they restart.
+                if let Err(e) = runtime.reconcile_device_list().await {
+                    tracing::debug!("device list reconcile failed: {e}");
+                }
             }
         });
     }

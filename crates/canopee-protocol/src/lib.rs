@@ -127,6 +127,9 @@ pub enum NodeCommand {
         id: ObjectId,
     },
     List,
+    DeleteObject {
+        id: ObjectId,
+    },
     /// Gives a stored object a human-readable name (stored alongside the
     /// object, never inside the signed bundle). Local convenience so listings
     /// and resolution can stay id-free.
@@ -223,10 +226,28 @@ pub enum NodeCommand {
     },
     /// Shares a stored object under `name`: upserts a `shared: true` home
     /// entry and announces the object as a DHT provider.
+    /// Returns this node's own X25519 DH public key (base64). Public, and
+    /// needed by peers to name you as a share recipient.
+    DhPublicKey,
+    /// Stores an object without encrypting it. Reserved for app artifacts,
+    /// which an edge with no identity key must be able to read and serve.
+    PutObjectPublic {
+        data: Vec<u8>,
+        object_type: ObjectType,
+        name: Option<String>,
+    },
     ShareObject {
         name: String,
         object: ObjectId,
         app: Option<String>,
+        /// DH public keys of the contacts this object should be readable by,
+        /// in addition to the owner's own devices. Empty means "share the
+        /// existing object as-is", which keeps the current object id.
+        ///
+        /// When non-empty the node re-encrypts a per-recipient copy (see
+        /// `Runtime::share_object_for`), so the published id differs from the
+        /// local one.
+        recipients: Vec<[u8; 32]>,
     },
     /// Claims a globally unique username for this node's identity (publishes
     /// the signed `(owner, "username")` record + the DHT registry entry).
@@ -237,6 +258,9 @@ pub enum NodeCommand {
     /// DHT registry (spoof-verified against the owner's signed record).
     ResolveUsername {
         username: String,
+    },
+    ResolveProfile {
+        owner: IdentityId,
     },
     /// Returns the identity key as a transferable, encrypted envelope (see
     /// `Identity::export_encrypted`) — the "move my identity to another
@@ -357,6 +381,10 @@ pub enum NodeResponse {
     ObjectCreated {
         id: ObjectId,
     },
+    /// The response to `DhPublicKey`: this node's own X25519 public key.
+    DhPublicKey {
+        key: [u8; 32],
+    },
     /// The response to `Concat`: the id of the newly created concatenation.
     Concatenated {
         id: ObjectId,
@@ -368,6 +396,7 @@ pub enum NodeResponse {
     Objects {
         objects: Vec<ObjectInfo>,
     },
+    ObjectDeleted,
     Exported {
         bundle: ExportBundle,
     },

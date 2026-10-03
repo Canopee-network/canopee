@@ -62,7 +62,9 @@ pub async fn publish_directory(
         let path = entry.path();
         let data = tokio::fs::read(path).await?;
         let relative = path.strip_prefix(directory)?.to_string_lossy().to_string();
-        let object_id = client.put_file(&relative, data.clone()).await?;
+        // App artifacts are published to an edge that holds no identity key,
+        // so they must stay plaintext — see `Runtime::put_object_public`.
+        let object_id = client.put_public_file(&relative, data.clone()).await?;
 
         if !quiet {
             println!("{} -> {}", relative, object_id);
@@ -663,8 +665,8 @@ fn parse_range(header: Option<&str>, len: usize) -> Option<RangeSpec> {
 
 /// gzip-compresses `body` into a new vec (returns the gzip bytes).
 fn gzip_body(body: &[u8]) -> std::io::Result<Vec<u8>> {
-    use flate2::write::GzEncoder;
     use flate2::Compression;
+    use flate2::write::GzEncoder;
     use std::io::Write;
     let mut encoder = GzEncoder::new(Vec::with_capacity(body.len()), Compression::default());
     encoder.write_all(body)?;

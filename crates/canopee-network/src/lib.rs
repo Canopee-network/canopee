@@ -5,13 +5,13 @@ pub mod peer;
 
 pub use libp2p::{Multiaddr, PeerId};
 pub use manager::{
-    InboundPairing, InboundServe, InboundServeRegistration, NetworkManager, ObjectProvider,
-    ObjectStore, DEFAULT_BOOTSTRAP_ADDRS,
+    DEFAULT_BOOTSTRAP_ADDRS, InboundPairing, InboundServe, InboundServeRegistration,
+    NetworkManager, ObjectProvider, ObjectStore,
 };
 pub use message::{
-    app_subdomain, CanopeePairingRequest, CanopeePairingResponse, ObjectRequest, ObjectResponse,
-    PubSubMessage, ServeRegistration, ServeRegistrationResponse, ServeRequest, ServeResponse,
-    SERVE_FORWARDED_HEADERS,
+    CanopeePairingRequest, CanopeePairingResponse, ObjectRequest, ObjectResponse, PubSubMessage,
+    SERVE_FORWARDED_HEADERS, ServeRegistration, ServeRegistrationResponse, ServeRequest,
+    ServeResponse, app_subdomain,
 };
 pub use peer::{Peer, RelayReservation};
 

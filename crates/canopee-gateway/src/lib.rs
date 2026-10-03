@@ -451,9 +451,24 @@ async fn handle(
             Ok(serde_json::json!({ "id": id.0 }))
         }
 
-        ShareObject { name, object, app } => {
+        ShareObject {
+            name,
+            object,
+            app,
+            recipients_b64,
+        } => {
+            let mut recipients = Vec::with_capacity(recipients_b64.len());
+            for encoded in &recipients_b64 {
+                let bytes = B64
+                    .decode(encoded)
+                    .map_err(|e| anyhow::anyhow!("recipient key is not valid base64: {e}"))?;
+                let key: [u8; 32] = bytes
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("recipient key must be 32 bytes"))?;
+                recipients.push(key);
+            }
             let id = client
-                .share_object(name, ObjectId::new(&object), app)
+                .share_object_for(name, ObjectId::new(&object), app, &recipients)
                 .await?;
             Ok(serde_json::json!({ "id": id.0 }))
         }

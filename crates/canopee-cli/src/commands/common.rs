@@ -1,7 +1,44 @@
 use crate::app::{fetch_app, serve};
-use canopee_sdk::CanopeeClient;
+use canopee_sdk::{CanopeeClient, NodeClient};
 use canopee_storage::{ExportBundle, ObjectId};
 use std::path::Path;
+
+/// Connects to the local node, exiting with an actionable message when it
+/// isn't running.
+///
+/// `NodeClient::new` only computes a socket path — it never contacts the
+/// daemon — so a raw `UnixStream::connect` on a missing socket fails with a
+/// bare `No such file or directory (os error 2)`, which a first-time user
+/// can't act on. Say what to do instead.
+pub(crate) async fn node_or_exit() -> NodeClient {
+    let node = match NodeClient::new().await {
+        Ok(node) => node,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    };
+    if !node.is_running().await {
+        eprintln!(
+            "Error: the Canopee node is not running.\n\
+             Start it with `canopee start`, or run the `canopee-node` binary directly."
+        );
+        std::process::exit(1);
+    }
+    node
+}
+
+/// Same as [`node_or_exit`] for commands that go through the higher-level
+/// [`CanopeeClient`], which already carries a "not running" check.
+pub(crate) async fn client_or_exit() -> CanopeeClient {
+    match CanopeeClient::connect().await {
+        Ok(client) => client,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
 
 /// Imports a fetched bundle, treating "already stored" as success: fetching
 /// an object you already hold is a no-op, not an error. Any other failure

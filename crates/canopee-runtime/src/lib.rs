@@ -401,23 +401,103 @@ impl Runtime {
         Ok(imported.id().clone())
     }
 
-    pub async fn put(&self, data: Vec<u8>, name: Option<String>) -> anyhow::Result<ObjectId> {
-        let object = Object::new(&self.identity, data, ObjectType::Blob);
-        let id = object.id.clone();
-        self.storage.put_verified(&object).await?;
-        if let Some(name) = name {
-            self.storage.set_name(&id, &name).await?;
-        }
-        Ok(id)
+    /// Wraps `data` for this identity's own devices (and any explicit
+    /// `recipients`) before it is stored, signed, or replicated.
+    ///
+    /// Objects are encrypted **by default**: what lands on disk, in an export
+    /// bundle, on the relay, and in every peer's cache is ciphertext. Because
+    /// pairing copies the identity key, the owner's own DH key is shared by all
+    /// of that person's devices, so every device they own can still read
+    /// everything — see [`canopee_identity::envelope`].
+    ///
+    /// `metadata.size` keeps reporting the *plaintext* length so the UI can
+    /// show real file sizes; that is a deliberate, documented leak.
+    fn seal(&self, data: Vec<u8>, recipients: &[[u8; 32]]) -> anyhow::Result<Vec<u8>> {
+        self.identity
+            .encrypt_for_recipients(&data, recipients)
+            .map_err(|e| anyhow::anyhow!("encrypting object for its recipients failed: {e}"))
     }
 
+    /// Returns `object` with its payload decrypted.
+    ///
+    /// Objects stored before encryption existed are passed through untouched, so
+    /// an existing store keeps working with no migration step. Read paths must
+    /// go through this rather than handing raw object bytes to a caller.
+    pub fn open_object(
+        &self,
+        object: &canopee_storage::Object,
+    ) -> anyhow::Result<canopee_storage::Object> {
+        if !canopee_identity::is_envelope(&object.payload.data) {
+            return Ok(object.clone());
+        }
+        let plaintext = self
+            .identity
+            .decrypt_envelope(&object.payload.data)
+            .map_err(|e| anyhow::anyhow!("decrypting object {}: {e}", object.id))?;
+        let mut opened = object.clone();
+        opened.payload.data = plaintext;
+        Ok(opened)
+    }
+
+    /// Whether an object's payload is encrypted for its recipients.
+    pub fn is_encrypted(object: &canopee_storage::Object) -> bool {
+        canopee_identity::is_envelope(&object.payload.data)
+    }
+
+    pub async fn put(&self, data: Vec<u8>, name: Option<String>) -> anyhow::Result<ObjectId> {
+        let object = self.put_object(data, ObjectType::Blob, name).await?;
+        Ok(object.id)
+    }
+
+    /// Creates and stores a new object, encrypting the payload to this
+    /// identity's devices plus any extra `recipients`.
     pub async fn put_object(
         &self,
         data: Vec<u8>,
         object_type: ObjectType,
         name: Option<String>,
     ) -> anyhow::Result<Object> {
-        let object = Object::new(&self.identity(), data, object_type);
+        let object = self.put_object_for(data, object_type, name, &[]).await?;
+        Ok(object)
+    }
+
+    /// [`Self::put_object`] with explicit recipient keys — used when sharing a
+    /// file with a specific contact.
+    pub async fn put_object_for(
+        &self,
+        data: Vec<u8>,
+        object_type: ObjectType,
+        name: Option<String>,
+        recipients: &[[u8; 32]],
+    ) -> anyhow::Result<Object> {
+        // Build once to get plaintext-derived metadata (notably `size`, which
+        // the UI shows and which must not become the ciphertext length), then
+        // reseal so the id and signature cover the encrypted payload.
+        let mut object = Object::new(self.identity(), data, object_type);
+        object.payload.data = self.seal(std::mem::take(&mut object.payload.data), recipients)?;
+        self.reseal(&mut object).await?;
+        if let Some(name) = name {
+            self.storage.set_name(&object.id, &name).await?;
+        }
+        Ok(object)
+    }
+
+    /// Stores an object **without** encrypting it.
+    ///
+    /// Reserved for app artifacts (manifests, entrypoints, assets). An app is
+    /// published to an edge that holds no identity key and cannot decrypt
+    /// anything — it fetches the manifest, verifies it hashes to the claimed
+    /// app id, and serves the files to the public internet. Encrypting those
+    /// would make apps unpublishable, and it would buy nothing: an app is
+    /// public output by definition. Everything else goes through
+    /// [`Self::put_object`] and is encrypted.
+    pub async fn put_object_public(
+        &self,
+        data: Vec<u8>,
+        object_type: ObjectType,
+        name: Option<String>,
+    ) -> anyhow::Result<Object> {
+        let object = Object::new(self.identity(), data, object_type);
         self.storage.put_verified(&object).await?;
         if let Some(name) = name {
             self.storage.set_name(&object.id, &name).await?;
@@ -425,9 +505,40 @@ impl Runtime {
         Ok(object)
     }
 
+    /// Recomputes an object's id and signature over its (mutated) payload, so
+    /// an encrypted payload is still content-addressed and verifiable.
+    async fn reseal(&self, object: &mut Object) -> anyhow::Result<()> {
+        object.id = canopee_storage::ObjectId::from_payload(&object.payload);
+        let encoded = bincode::serialize(&object.payload)?;
+        object.signature = self.identity.sign(&encoded)?;
+        self.storage.put_verified(object).await
+    }
+
+    /// Reads an object, retrieving it from the network when it isn't held
+    /// locally.
+    ///
+    /// This is the multi-device path: an object you stored on your laptop
+    /// must be readable from your phone without you first naming a peer to
+    /// pull from. Local storage is checked first, then connected peers, then
+    /// DHT providers (see [`Self::fetch_object`]).
+    /// Returns an object with its payload **decrypted**, so callers never see
+    /// ciphertext.
+    ///
+    /// This is the read path for the CLI and for apps. Encrypted objects stay
+    /// encrypted on disk, in transit, and on the relay — the plaintext only
+    /// ever materialises here, in this process, for the identity that is
+    /// entitled to read it. Objects written before encryption existed are
+    /// returned unchanged.
+    ///
+    /// Lookup order is unchanged: local store, then connected peers, then DHT
+    /// providers.
     pub async fn get(&self, id: &ObjectId) -> anyhow::Result<Object> {
-        let object = self.storage.get_verified(id).await?;
-        Ok(object)
+        let object = if let Ok(object) = self.storage.get_verified(id).await {
+            object
+        } else {
+            self.fetch_object(id.clone(), None).await?
+        };
+        self.open_object(&object)
     }
 
     /// Concatenates the payloads of the given objects (each verified locally
@@ -452,6 +563,10 @@ impl Runtime {
             } else {
                 self.fetch_object(id.clone(), None).await?
             };
+            // Inputs may be encrypted (or legacy plaintext); concatenate
+            // plaintext so the result is a readable file, not a ciphertext
+            // soup.
+            let object = self.open_object(&object)?;
             if i > 0 {
                 inputs.push(',');
             }
@@ -509,6 +624,42 @@ impl Runtime {
         Ok(())
     }
 
+    pub async fn delete_object(&self, id: &ObjectId) -> anyhow::Result<()> {
+        let object = self.storage.get_verified(id).await?;
+        if object.payload.owner != *self.identity.id() {
+            anyhow::bail!("only objects owned by this identity can be deleted");
+        }
+        if !matches!(
+            object.object_type(),
+            ObjectType::Blob | ObjectType::AppManifest
+        ) {
+            anyhow::bail!("system records cannot be deleted");
+        }
+
+        let old_home_id = self
+            .resolve_pointer(self.identity.id(), canopee_storage::RECORD_HOME)
+            .await?
+            .map(|record| record.manifest);
+        let home = self.load_home_index().await?;
+        if let Some(mut home) = home {
+            if home.profile.as_ref() == Some(id) || home.contacts.as_ref() == Some(id) {
+                anyhow::bail!("profile and contact records cannot be deleted here");
+            }
+            if let Some(index) = home.entries.iter().position(|entry| entry.object == *id) {
+                home.entries.remove(index);
+                self.save_home_index(&home).await?;
+            }
+        }
+
+        self.evict(id).await?;
+        if let Some(old_home_id) = old_home_id
+            && old_home_id != *id
+        {
+            let _ = self.evict(&old_home_id).await;
+        }
+        Ok(())
+    }
+
     /// Total bytes currently held by cached (non-owned) objects.
     pub async fn cached_bytes(&self) -> u64 {
         self.cache.total_cached_bytes(&self.storage).await
@@ -551,7 +702,7 @@ mod tests {
 
     #[tokio::test]
     async fn import_marks_non_owned_object_as_cached() {
-        let _guard = LOCK.lock().unwrap();
+        let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let _ = with_scratch_home();
         let runtime = Runtime::open().await.unwrap();
 
@@ -581,7 +732,7 @@ mod tests {
 
     #[tokio::test]
     async fn import_does_not_mark_own_object_as_cached() {
-        let _guard = LOCK.lock().unwrap();
+        let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let _ = with_scratch_home();
         let runtime = Runtime::open().await.unwrap();
 
@@ -607,7 +758,7 @@ mod tests {
 
     #[tokio::test]
     async fn with_root_gives_isolated_identities_and_storage() {
-        let _guard = LOCK.lock().unwrap();
+        let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let base =
             std::env::temp_dir().join(format!("canopee_runtime_with_root_{}", std::process::id()));
         let root_a = base.join("a");
@@ -667,7 +818,7 @@ mod tests {
 
     #[tokio::test]
     async fn evict_deletes_storage_and_cache_entry() {
-        let _guard = LOCK.lock().unwrap();
+        let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let _ = with_scratch_home();
         let runtime = Runtime::open().await.unwrap();
 
@@ -700,7 +851,7 @@ mod tests {
 
     #[tokio::test]
     async fn shared_user_root_gives_one_identity_and_shared_store() {
-        let _guard = LOCK.lock().unwrap();
+        let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let base =
             std::env::temp_dir().join(format!("canopee_runtime_shared_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -767,7 +918,7 @@ mod tests {
 
     #[tokio::test]
     async fn evict_owned_object_is_allowed_only_through_explicit_evict() {
-        let _guard = LOCK.lock().unwrap();
+        let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let _ = with_scratch_home();
         let runtime = Runtime::open().await.unwrap();
 
@@ -789,7 +940,7 @@ mod tests {
 
     #[tokio::test]
     async fn owned_objects_are_served_only_once_shared() {
-        let _guard = LOCK.lock().unwrap();
+        let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let base =
             std::env::temp_dir().join(format!("canopee_runtime_gate_owned_{}", std::process::id()));
         let runtime = Runtime::open_with_root(base).await.unwrap();
@@ -823,7 +974,7 @@ mod tests {
 
     #[tokio::test]
     async fn cached_objects_are_always_served() {
-        let _guard = LOCK.lock().unwrap();
+        let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let base = std::env::temp_dir().join(format!(
             "canopee_runtime_gate_cached_{}",
             std::process::id()
@@ -856,7 +1007,7 @@ mod tests {
 
     #[tokio::test]
     async fn home_index_share_unshare_roundtrip() {
-        let _guard = LOCK.lock().unwrap();
+        let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let base =
             std::env::temp_dir().join(format!("canopee_runtime_home_{}", std::process::id()));
         let runtime = Runtime::open_with_root(base).await.unwrap();
@@ -887,7 +1038,7 @@ mod tests {
 
     #[tokio::test]
     async fn foreign_uncached_objects_are_not_served() {
-        let _guard = LOCK.lock().unwrap();
+        let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let base = std::env::temp_dir().join(format!(
             "canopee_runtime_gate_foreign_{}",
             std::process::id()
@@ -920,7 +1071,7 @@ mod tests {
 
     #[tokio::test]
     async fn save_home_index_reconciles_shared_flags() {
-        let _guard = LOCK.lock().unwrap();
+        let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let base =
             std::env::temp_dir().join(format!("canopee_runtime_reconcile_{}", std::process::id()));
         let runtime = Runtime::open_with_root(base).await.unwrap();
@@ -966,16 +1117,18 @@ mod tests {
 
     #[tokio::test]
     async fn set_home_entry_shared_flips_flag_and_validates() {
-        let _guard = LOCK.lock().unwrap();
+        let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let base =
             std::env::temp_dir().join(format!("canopee_runtime_set_shared_{}", std::process::id()));
         let runtime = Runtime::open_with_root(base).await.unwrap();
 
         // No home index yet.
-        assert!(runtime
-            .set_home_entry_shared("pic.png", true)
-            .await
-            .is_err());
+        assert!(
+            runtime
+                .set_home_entry_shared("pic.png", true)
+                .await
+                .is_err()
+        );
 
         let blob = runtime
             .put_object(b"pic".to_vec(), ObjectType::Blob, None)
@@ -1018,7 +1171,7 @@ mod tests {
 
     #[tokio::test]
     async fn share_object_upserts_entry_and_serves() {
-        let _guard = LOCK.lock().unwrap();
+        let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let base = std::env::temp_dir().join(format!(
             "canopee_runtime_share_object_{}",
             std::process::id()
@@ -1028,10 +1181,12 @@ mod tests {
         let provider = provider_for(&runtime);
 
         // Sharing an object that isn't stored locally is an error.
-        assert!(runtime
-            .share_object("ghost", &ObjectId::new("nope"), None)
-            .await
-            .is_err());
+        assert!(
+            runtime
+                .share_object("ghost", &ObjectId::new("nope"), None)
+                .await
+                .is_err()
+        );
 
         let blob = runtime
             .put_object(b"share me".to_vec(), ObjectType::Blob, None)
@@ -1088,7 +1243,7 @@ mod tests {
 
     #[tokio::test]
     async fn sharing_publishes_a_resolvable_entry_pointer() {
-        let _guard = LOCK.lock().unwrap();
+        let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let base = std::env::temp_dir().join(format!(
             "canopee_runtime_entry_pointer_{}",
             std::process::id()
@@ -1135,7 +1290,7 @@ mod tests {
 
     #[tokio::test]
     async fn shared_entries_survive_reopen() {
-        let _guard = LOCK.lock().unwrap();
+        let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let base =
             std::env::temp_dir().join(format!("canopee_runtime_reopen_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -1176,7 +1331,7 @@ mod tests {
 
     #[tokio::test]
     async fn concat_requires_at_least_one_object() {
-        let _guard = LOCK.lock().unwrap();
+        let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let base = std::env::temp_dir().join(format!(
             "canopee_runtime_concat_empty_{}",
             std::process::id()
@@ -1190,7 +1345,7 @@ mod tests {
 
     #[tokio::test]
     async fn concat_combines_payloads_and_replicates_to_connected_peer() {
-        let _guard = LOCK.lock().unwrap();
+        let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let base =
             std::env::temp_dir().join(format!("canopee_runtime_concat_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -1264,7 +1419,7 @@ mod tests {
 
     #[tokio::test]
     async fn peers_can_fetch_shared_objects_but_not_private_ones() {
-        let _guard = LOCK.lock().unwrap();
+        let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let base =
             std::env::temp_dir().join(format!("canopee_runtime_netshare_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -1319,10 +1474,37 @@ mod tests {
         // Once A announces the public object, B discovers and fetches it via
         // the DHT — and, being an import, B's copy becomes cached and
         // re-servable to further peers.
-        runtime_a.announce(public.id.clone()).await.unwrap();
+        //
+        // A must wrap the content key for B too: the object was encrypted to
+        // A's own devices when stored, so sharing it to B publishes a
+        // per-recipient copy under a new id.
+        runtime_a
+            .share_object_for(
+                "public",
+                &public.id,
+                None,
+                &[runtime_b.identity.dh_public_key()],
+            )
+            .await
+            .unwrap();
+        let shared_id = runtime_a
+            .load_home_index()
+            .await
+            .unwrap()
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|e| e.name == "public")
+            .unwrap()
+            .object;
+        assert_ne!(
+            shared_id, public.id,
+            "a re-encrypted per-recipient copy must not collide with the private original"
+        );
+        runtime_a.announce(shared_id.clone()).await.unwrap();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         let fetched = loop {
-            match runtime_b.fetch_object(public.id.clone(), None).await {
+            match runtime_b.fetch_object(shared_id.clone(), None).await {
                 Ok(object) => break object,
                 Err(_) => {
                     assert!(
@@ -1333,14 +1515,22 @@ mod tests {
                 }
             }
         };
-        assert_eq!(fetched.payload.data, b"for the network");
+        // The wire and the cache carry ciphertext: `fetch_object` is a raw
+        // storage primitive, so what it hands back is what was stored.
         assert!(
-            runtime_b.cache.is_cached(&public.id).await,
+            Runtime::is_encrypted(&fetched),
+            "an object fetched from a peer must arrive encrypted, not as plaintext"
+        );
+        // Reading it back through the normal path is what decrypts it.
+        let fetched_plaintext = runtime_b.get(&shared_id).await.unwrap();
+        assert_eq!(fetched_plaintext.payload.data, b"for the network");
+        assert!(
+            runtime_b.cache.is_cached(&shared_id).await,
             "fetching an announced object imports it as cached"
         );
         let provider_b = provider_for(&runtime_b);
         assert!(
-            provider_b.get_object(&public.id).await.is_some(),
+            provider_b.get_object(&shared_id).await.is_some(),
             "a cached copy must be re-served to further peers"
         );
 
@@ -1357,5 +1547,105 @@ mod tests {
             provider_b.get_object(&b_private.id).await.is_none(),
             "B's own unshared object must not be served"
         );
+    }
+
+    /// The end-to-end guarantee, stated directly: sharing to a contact makes the
+    /// object readable by exactly that contact — never by a third party, and
+    /// never in plaintext on the way.
+    #[tokio::test]
+    async fn a_shared_copy_opens_for_its_recipient_and_nobody_else() {
+        let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let base =
+            std::env::temp_dir().join(format!("canopee_runtime_sharee2e_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let alice = Runtime::open_with_root(base.join("alice")).await.unwrap();
+        let bob = Runtime::open_with_root(base.join("bob")).await.unwrap();
+        let eve = Runtime::open_with_root(base.join("eve")).await.unwrap();
+
+        let secret = b"meet at the usual place".to_vec();
+        let original = alice
+            .put_object(secret.clone(), ObjectType::Blob, Some("plan".into()))
+            .await
+            .unwrap();
+
+        // Stored encrypted to Alice's devices only.
+        let stored = alice.storage.get_verified(&original.id).await.unwrap();
+        assert!(
+            Runtime::is_encrypted(&stored),
+            "objects must be encrypted at rest by default"
+        );
+        assert!(
+            !stored
+                .payload
+                .data
+                .windows(secret.len())
+                .any(|w| w == secret.as_slice()),
+            "plaintext must not be recoverable from the stored bytes"
+        );
+
+        // Sharing to Bob publishes a separate, Bob-readable copy.
+        alice
+            .share_object_for("plan", &original.id, None, &[bob.identity.dh_public_key()])
+            .await
+            .unwrap();
+        let shared_id = alice
+            .load_home_index()
+            .await
+            .unwrap()
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|e| e.name == "plan")
+            .unwrap()
+            .object;
+
+        // The shared copy travels as ciphertext; hand Bob exactly the bytes a
+        // relay or peer would.
+        let wire = alice.storage.get_verified(&shared_id).await.unwrap();
+        bob.storage.put_verified(&wire).await.unwrap();
+        assert_eq!(bob.open_object(&wire).unwrap().payload.data, secret);
+
+        // Eve cannot, even holding the very same ciphertext.
+        let error = eve
+            .open_object(&wire)
+            .expect_err("a non-recipient identity must not be able to open a shared copy");
+        assert!(
+            error.to_string().contains("no recipient key"),
+            "expected a recipient mismatch, got: {error}"
+        );
+
+        // Alice keeps read access to both her private original and the copy.
+        assert_eq!(alice.get(&original.id).await.unwrap().payload.data, secret);
+        assert_eq!(alice.get(&shared_id).await.unwrap().payload.data, secret);
+    }
+
+    /// Sharing with no recipients must not churn the object id: there is
+    /// nothing to re-wrap, so the original is published unchanged.
+    #[tokio::test]
+    async fn sharing_to_nobody_keeps_the_object_id() {
+        let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let base =
+            std::env::temp_dir().join(format!("canopee_runtime_sharestay_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let alice = Runtime::open_with_root(base.join("alice")).await.unwrap();
+
+        let id = alice
+            .put(b"mine".to_vec(), Some("note".into()))
+            .await
+            .unwrap();
+        alice
+            .share_object_for("note", &id, None, &[])
+            .await
+            .unwrap();
+        let entry = alice
+            .load_home_index()
+            .await
+            .unwrap()
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|e| e.name == "note")
+            .unwrap();
+        assert_eq!(entry.object, id);
     }
 }

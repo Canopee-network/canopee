@@ -284,6 +284,13 @@ impl Node {
                 },
             },
 
+            NodeCommand::DeleteObject { id } => match self.runtime.delete_object(&id).await {
+                Ok(()) => NodeResponse::ObjectDeleted,
+                Err(e) => NodeResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+
             NodeCommand::Status => {
                 let objects = self.runtime.list().await.unwrap_or_default().len();
                 let peers = self.runtime.network.peers().await.unwrap_or_default().len();
@@ -544,8 +551,38 @@ impl Node {
                 }
             }
 
-            NodeCommand::ShareObject { name, object, app } => {
-                match self.runtime.share_object(&name, &object, app).await {
+            NodeCommand::DhPublicKey => NodeResponse::DhPublicKey {
+                key: self.runtime.identity().dh_public_key(),
+            },
+
+            NodeCommand::PutObjectPublic {
+                data,
+                object_type,
+                name,
+            } => {
+                match self
+                    .runtime
+                    .put_object_public(data, object_type, name)
+                    .await
+                {
+                    Ok(object) => NodeResponse::ObjectCreated { id: object.id },
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+
+            NodeCommand::ShareObject {
+                name,
+                object,
+                app,
+                recipients,
+            } => {
+                match self
+                    .runtime
+                    .share_object_for(&name, &object, app, &recipients)
+                    .await
+                {
                     Ok(id) => NodeResponse::HomeIndexSaved { id },
                     Err(e) => NodeResponse::Error {
                         message: e.to_string(),
@@ -565,6 +602,15 @@ impl Node {
             NodeCommand::ResolveUsername { username } => {
                 match self.runtime.resolve_owner_from_username(&username).await {
                     Ok(owner) => NodeResponse::UsernameOwner { owner },
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+
+            NodeCommand::ResolveProfile { owner } => {
+                match self.runtime.resolve_profile(&owner).await {
+                    Ok(profile) => NodeResponse::Profile { profile },
                     Err(e) => NodeResponse::Error {
                         message: e.to_string(),
                     },

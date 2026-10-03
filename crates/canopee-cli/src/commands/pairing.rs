@@ -1,11 +1,10 @@
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
-use canopee_sdk::CanopeeClient;
+use base64::engine::general_purpose::STANDARD as BASE64;
 
 use super::common::short_peer_id;
 
 pub(crate) async fn pair(qr: Option<String>, code: Option<String>) {
-    let client = CanopeeClient::connect().await.unwrap();
+    let client = super::common::client_or_exit().await;
     match qr {
         // New-device side: mint a code/session and print the QR payload
         // for the user to read off to the other machine.

@@ -6,7 +6,10 @@ const VERSION: &str = env!("CANOPEE_BUILD_VERSION");
 async fn main() -> anyhow::Result<()> {
     // `canopee-node --version` must not start a node: it is used by the
     // deploy/CI tooling to confirm which build is actually running.
-    if std::env::args().skip(1).any(|a| a == "--version" || a == "-V") {
+    if std::env::args()
+        .skip(1)
+        .any(|a| a == "--version" || a == "-V")
+    {
         println!("canopee-node {VERSION}");
         return Ok(());
     }

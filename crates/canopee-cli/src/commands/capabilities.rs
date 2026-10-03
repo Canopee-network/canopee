@@ -1,10 +1,9 @@
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
-use canopee_sdk::CanopeeClient;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use canopee_storage::{Permission, Resource};
 
 pub(crate) async fn capabilities(command: crate::CapCommand) {
-    let client = CanopeeClient::connect().await.unwrap();
+    let client = super::common::client_or_exit().await;
     match command {
         crate::CapCommand::Grant {
             subject,

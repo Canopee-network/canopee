@@ -53,7 +53,10 @@ impl Config {
         // Kademlia/bootstrap + dialing — the path used between devices that
         // are NOT on the same LAN.
         let mdns_enabled = match std::env::var("CANOPEE_MDNS").ok() {
-            Some(v) => !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"),
+            Some(v) => !matches!(
+                v.to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            ),
             None => true,
         };
         Self {
@@ -232,10 +235,7 @@ mod tests {
 
     #[test]
     fn with_roots_splits_both_explicitly() {
-        let c = Config::new().with_roots(
-            PathBuf::from("/tmp/app-a"),
-            PathBuf::from("/tmp/user"),
-        );
+        let c = Config::new().with_roots(PathBuf::from("/tmp/app-a"), PathBuf::from("/tmp/user"));
         assert_eq!(c.home_dir(), PathBuf::from("/tmp/app-a"));
         assert_eq!(c.identity_path(), PathBuf::from("/tmp/user/identity"));
         assert_eq!(c.storage_path(), PathBuf::from("/tmp/user/storage"));
@@ -243,7 +243,8 @@ mod tests {
 
     #[test]
     fn with_user_root_moves_only_the_user_scope() {
-        let c = Config::with_root(PathBuf::from("/tmp/app")).with_user_root(PathBuf::from("/tmp/user"));
+        let c =
+            Config::with_root(PathBuf::from("/tmp/app")).with_user_root(PathBuf::from("/tmp/user"));
         assert_eq!(c.home_dir(), PathBuf::from("/tmp/app"));
         assert_eq!(c.identity_path(), PathBuf::from("/tmp/user/identity"));
         assert_eq!(c.storage_path(), PathBuf::from("/tmp/user/storage"));

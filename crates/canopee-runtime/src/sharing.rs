@@ -85,14 +85,54 @@ impl Runtime {
     /// the home index (creating the index on first use) and announces the
     /// object as a DHT provider. This is the one-call "put this file on the
     /// network" action. Returns the new index object id.
+    ///
+    /// Shares to your own devices only. Use [`Self::share_object_for`] to make
+    /// the object readable by other people.
     pub async fn share_object(
         &self,
         name: &str,
         id: &ObjectId,
         app: Option<String>,
     ) -> anyhow::Result<ObjectId> {
+        self.share_object_for(name, id, app, &[]).await
+    }
+
+    /// Shares a stored object under `name`, additionally readable by each of
+    /// `recipients`.
+    ///
+    /// Objects are encrypted to the owner's own devices when stored, so another
+    /// person cannot read a shared object unless its content key is also
+    /// wrapped for their key. We hold the owner's key, so we decrypt our own
+    /// copy and re-encrypt it for `owner + recipients`, then publish that.
+    ///
+    /// Because objects are content-addressed over their *ciphertext*, the
+    /// published copy has a **different id** from your local original. Your
+    /// local object stays private; the shared entry points at the per-recipient
+    /// copy. With no `recipients` there is nothing to re-wrap, so the existing
+    /// object is shared unchanged and keeps its id.
+    ///
+    /// Returns the new index object id.
+    pub async fn share_object_for(
+        &self,
+        name: &str,
+        id: &ObjectId,
+        app: Option<String>,
+        recipients: &[[u8; 32]],
+    ) -> anyhow::Result<ObjectId> {
         let object = self.storage.get_verified(id).await?;
         let object_type = object.object_type();
+
+        let shared_id = if recipients.is_empty() {
+            id.clone()
+        } else {
+            // Readable by us, so we can open it and re-wrap the content key.
+            let opened = self.open_object(&object)?;
+            let sealed = self
+                .put_object_for(opened.payload.data, object_type, None, recipients)
+                .await?;
+            sealed.id
+        };
+
         let mut index = self.load_home_index().await?.unwrap_or(HomeIndex {
             profile: None,
             contacts: None,
@@ -101,21 +141,21 @@ impl Runtime {
         });
         match index.entries.iter_mut().find(|e| e.name == name) {
             Some(entry) => {
-                entry.object = id.clone();
+                entry.object = shared_id.clone();
                 entry.object_type = object_type;
                 entry.shared = true;
                 entry.app = app;
             }
             None => index.entries.push(canopee_storage::HomeEntry {
                 name: name.to_string(),
-                object: id.clone(),
+                object: shared_id.clone(),
                 object_type,
                 shared: true,
                 app,
             }),
         }
         let index_id = self.save_home_index(&index).await?;
-        self.publish_entry_pointer(name, id).await;
+        self.publish_entry_pointer(name, &shared_id).await;
         Ok(index_id)
     }
 
@@ -190,16 +230,19 @@ impl Runtime {
             if Some(peer.peer_id) == from {
                 continue; // handled by the explicit `from` arm below
             }
-            match self.network.get_object(peer.peer_id, object_id.clone()).await {
+            match self
+                .network
+                .get_object(peer.peer_id, object_id.clone())
+                .await
+            {
                 Ok(bundle) => {
                     let object = bundle.object.clone();
                     self.import(bundle).await?;
                     return Ok(object);
                 }
-                Err(e) => tracing::debug!(
-                    "fetch from connected peer {:?} failed: {e}",
-                    peer.peer_id
-                ),
+                Err(e) => {
+                    tracing::debug!("fetch from connected peer {:?} failed: {e}", peer.peer_id)
+                }
             }
         }
         if let Some(peer) = from {

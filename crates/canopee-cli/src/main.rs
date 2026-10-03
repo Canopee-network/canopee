@@ -113,6 +113,27 @@ enum Commands {
         /// The object to share: a 64-char hex id, or a name you stored it
         /// under. Omit to share the local object already named `<name>`.
         id: Option<String>,
+        /// Contacts (by contact name or peer id) who should be able to read
+        /// the object. Repeatable: `--to alice --to bob`.
+        ///
+        /// Objects are encrypted to your own devices, so someone else needs the
+        /// content key wrapped for their key too. Naming a contact publishes a
+        /// separate copy readable by them — which, because objects are
+        /// addressed by their ciphertext, has a different id than your local
+        /// original. With no `--to`, the object is shared to your own devices
+        /// only and keeps its id.
+        #[arg(long = "to", value_name = "CONTACT")]
+        to: Vec<String>,
+    },
+    /// Prints this node's X25519 DH public key (base64). Give it to someone who
+    /// wants to share objects you can decrypt.
+    DhKey,
+    /// Adds a contact: records their peer id and X25519 DH public key so you
+    /// can share objects they can decrypt (`canopee share --to <name>`).
+    ContactAdd {
+        name: String,
+        peer_id: String,
+        dh_key_b64: String,
     },
     /// Stops sharing the home entry `<name>`: the object is withdrawn from
     /// the DHT and no longer served to peers.
@@ -362,7 +383,13 @@ async fn main() {
         Commands::Announce { id } => commands::network::announce(id, ids).await,
         Commands::FindProviders { id } => commands::network::find_providers(id).await,
         Commands::Fetch { peer_id, id } => commands::network::fetch(peer_id, id, ids).await,
-        Commands::Share { name, id } => commands::sharing::share(name, id, ids).await,
+        Commands::Share { name, id, to } => commands::sharing::share(name, id, to, ids).await,
+        Commands::DhKey => commands::identity::dh_key().await,
+        Commands::ContactAdd {
+            name,
+            peer_id,
+            dh_key_b64,
+        } => commands::sharing::contact_add(name, peer_id, dh_key_b64).await,
         Commands::Unshare { name } => commands::sharing::unshare(name).await,
         Commands::Home => commands::sharing::home(ids).await,
         Commands::Pub { topic, message } => commands::network::publish(topic, message).await,

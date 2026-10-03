@@ -1,4 +1,4 @@
-use crate::{normalize_username, owner_peer_id, Runtime};
+use crate::{Runtime, normalize_username, owner_peer_id};
 use canopee_identity::IdentityId;
 use canopee_network::PeerId;
 use canopee_storage::{
@@ -54,7 +54,9 @@ impl Runtime {
     async fn push_pointer_record(&self, bytes: Vec<u8>) -> anyhow::Result<()> {
         let object = Object::new(&self.identity, bytes, ObjectType::AppPointer);
         self.storage.put_verified(&object).await?;
-        self.network.replicate_object(object.export()?, None).await?;
+        self.network
+            .replicate_object(object.export()?, None)
+            .await?;
         Ok(())
     }
 
@@ -180,6 +182,13 @@ impl Runtime {
             .unwrap_or(1);
         let mut profile = profile.clone();
         profile.version = version;
+        // The advertised DH key must be this identity's real one. Callers
+        // (CLI, gateway, SDK) construct a `Profile` and could otherwise publish
+        // a stale or all-zero key — which would make this identity
+        // unshareable, since peers wrap content keys for it and decryption
+        // would fail with no obvious cause. Enforce it here, at the one place
+        // profiles become published objects.
+        profile.dh_public_key = self.identity.dh_public_key();
         let object = profile.to_object(&self.identity)?;
         let id = object.id.clone();
         self.storage.put_verified(&object).await?;
@@ -444,6 +453,123 @@ impl Runtime {
         Ok(Some(object.decode()?))
     }
 
+    /// Loads the device list, unioned with the freshest copy reachable from
+    /// the network.
+    ///
+    /// [`Self::load_device_list`] resolves through the *locally cached*
+    /// pointer record. With several devices sharing one identity that is the
+    /// root of a lost-update race: each device loads its own stale snapshot,
+    /// appends itself, and republishes — so whichever writes last erases the
+    /// others and `canopee devices` shows a single machine even though every
+    /// device registered correctly.
+    ///
+    /// Merging the network's view (when reachable) keeps the union of all
+    /// registered devices. Note the deliberate trade-off: a device removed on
+    /// one machine can be resurrected by a concurrent save on another that
+    /// hasn't yet learned about the removal. Removals stay correct on the
+    /// machine that performed them, which is the overwhelmingly common case.
+    async fn load_device_list_merged(&self) -> anyhow::Result<DeviceList> {
+        let local = self.load_device_list(self.identity.id()).await?;
+
+        // Prefer the device's own entry over the network's, so a rename or a
+        // re-register is never rolled back by a peer's stale copy.
+        let mut merged = local.clone().unwrap_or(DeviceList {
+            devices: vec![],
+            version: 0,
+        });
+        let local_version = merged.version;
+
+        if let Ok(Some(remote)) = self.fetch_freshest_device_list().await {
+            for entry in remote.devices {
+                if !merged
+                    .devices
+                    .iter()
+                    .any(|d| d.device_id == entry.device_id)
+                {
+                    merged.devices.push(entry);
+                }
+            }
+            merged.version = local_version.max(remote.version);
+        }
+        Ok(merged)
+    }
+
+    /// Asks connected peers, then the DHT, for the owner's current
+    /// `(owner, "devices")` list, **bypassing the local pointer cache**.
+    ///
+    /// Two caches have to be side-stepped for this to work at all:
+    ///
+    /// * `resolve_pointer` returns this machine's cached pointer first, so on
+    ///   its own it names *this* device's stale snapshot.
+    /// * The device list is content-addressed, so every edit is a different
+    ///   object id. Asking peers for "the manifest my stale pointer names"
+    ///   therefore misses the newer list another device just wrote — it has a
+    ///   different id entirely.
+    ///
+    /// So this gathers every manifest id this machine knows about (cached
+    /// pointer, newest pointer object in local storage, DHT pointer), asks
+    /// peers for each, and keeps the highest-versioned list anybody serves.
+    async fn fetch_freshest_device_list(&self) -> anyhow::Result<Option<DeviceList>> {
+        let owner = self.identity.id();
+        let key = AppPointerRecord::key(owner, RECORD_DEVICES);
+
+        let mut manifests: Vec<ObjectId> = Vec::new();
+        if let Ok(Some(record)) = self.resolve_pointer(owner, RECORD_DEVICES).await {
+            manifests.push(record.manifest.clone());
+        }
+        if let Some(record) = self.latest_pointer_record(owner, RECORD_DEVICES).await {
+            manifests.push(record.manifest.clone());
+        }
+        if let Ok(Ok(bytes)) = tokio::time::timeout(
+            crate::RESOLVE_DHT_TIMEOUT,
+            self.network.get_record(key.clone()),
+        )
+        .await
+        {
+            if let Some(record) =
+                bytes.and_then(|b| bincode::deserialize::<AppPointerRecord>(&b).ok())
+            {
+                if record.owner == *owner && record.name == RECORD_DEVICES && record.verify() {
+                    manifests.push(record.manifest.clone());
+                }
+            }
+        }
+        manifests.sort_by(|a, b| a.0.cmp(&b.0));
+        manifests.dedup();
+
+        let mut peers: Vec<canopee_network::PeerId> = Vec::new();
+        if let Ok(connected) = self.network.peers().await {
+            peers.extend(connected.into_iter().map(|p| p.peer_id));
+        }
+        for manifest in &manifests {
+            if let Ok(providers) = self.network.find_providers(manifest.clone()).await {
+                peers.extend(providers);
+            }
+        }
+        peers.sort();
+        peers.dedup();
+        peers.retain(|p| *p != self.device_key.peer_id());
+
+        let mut best: Option<DeviceList> = None;
+        for manifest in &manifests {
+            for peer in &peers {
+                let Ok(bundle) = self.network.get_object(*peer, manifest.clone()).await else {
+                    continue;
+                };
+                if bundle.object.payload.owner != *owner {
+                    continue;
+                }
+                let Ok(list) = bundle.object.decode::<DeviceList>() else {
+                    continue;
+                };
+                if best.as_ref().is_none_or(|b| list.version > b.version) {
+                    best = Some(list);
+                }
+            }
+        }
+        Ok(best)
+    }
+
     /// Publishes a new `DeviceList` snapshot and repoints
     /// `(owner, "devices")`.
     pub async fn save_device_list(&self, list: &DeviceList) -> anyhow::Result<ObjectId> {
@@ -470,13 +596,7 @@ impl Runtime {
         device_id: &str,
         device_name: &str,
     ) -> anyhow::Result<DeviceList> {
-        let mut list = self
-            .load_device_list(self.identity.id())
-            .await?
-            .unwrap_or(DeviceList {
-                devices: vec![],
-                version: 0,
-            });
+        let mut list = self.load_device_list_merged().await?;
         let added_at = list.by_device_id(device_id).and_then(|d| d.added_at);
         if !list.devices.iter().any(|d| d.device_id == device_id) {
             list.devices.push(DeviceEntry {
@@ -494,13 +614,13 @@ impl Runtime {
 
     /// Removes one device from the owner's device list and republishes it.
     pub async fn remove_device(&self, device_id: &str) -> anyhow::Result<DeviceList> {
-        let mut list = self
-            .load_device_list(self.identity.id())
-            .await?
-            .unwrap_or(DeviceList {
-                devices: vec![],
-                version: 0,
-            });
+        let current = self.device_key.peer_id();
+        if device_id == current.to_string()
+            || device_id.parse::<PeerId>().ok().as_ref() == Some(&current)
+        {
+            anyhow::bail!("the current device cannot be removed");
+        }
+        let mut list = self.load_device_list_merged().await?;
         list.devices.retain(|d| d.device_id != device_id);
         let _ = self.save_device_list(&list).await?;
         Ok(list)
@@ -521,9 +641,63 @@ impl Runtime {
         self.publish_device_registry().await;
     }
 
+    /// Brings the local `(owner, "devices")` list in line with what the
+    /// network currently reports, republishing **only when the set actually
+    /// changed**.
+    ///
+    /// This is what makes the device list converge across machines instead of
+    /// only at boot. Registration is otherwise a startup-and-pairing event, so
+    /// a device that joins later stays invisible to already-running devices
+    /// until they restart. Being write-frugal matters: the periodic sync calls
+    /// this every 30s, and an unconditional save would mint a fresh
+    /// content-addressed object plus a DHT announcement each time.
+    pub(crate) async fn reconcile_device_list(&self) -> anyhow::Result<()> {
+        let merged = self.load_device_list_merged().await?;
+        let local = self.load_device_list(self.identity.id()).await?;
+
+        // Ensure this device is present in the merged view before comparing,
+        // so a machine that has never registered doesn't look "unchanged".
+        let self_id = self.device_key.peer_id().to_string();
+        let mut wanted = merged.clone();
+        if !wanted.devices.iter().any(|d| d.device_id == self_id) {
+            wanted.devices.push(DeviceEntry {
+                device_id: self_id.clone(),
+                device_name: self.device_key.device_name().to_string(),
+                added_at: Some(OffsetDateTime::now_utc()),
+            });
+        }
+
+        let same_ids = |a: &DeviceList, b: &DeviceList| {
+            let mut x: Vec<&str> = a.devices.iter().map(|d| d.device_id.as_str()).collect();
+            let mut y: Vec<&str> = b.devices.iter().map(|d| d.device_id.as_str()).collect();
+            x.sort();
+            y.sort();
+            x == y
+        };
+
+        if let Some(local) = &local {
+            if same_ids(local, &wanted) {
+                return Ok(());
+            }
+        }
+
+        let count = wanted.devices.len();
+        self.save_device_list(&wanted).await?;
+        tracing::info!("device list reconciled to {count} device(s)");
+        Ok(())
+    }
+
     /// Schedules one DHT re-publication of this device's registry record,
     /// device-list pointer, and device-list provider announcement after the
-    /// network becomes reachable.
+    /// network becomes reachable, then re-runs the device registration.
+    ///
+    /// The re-registration is what makes multi-device work: the eager
+    /// [`Self::register_device`] at startup necessarily runs before the swarm
+    /// has connected to anyone, so its merge in
+    /// [`Self::load_device_list_merged`] has no peers to ask and just
+    /// republishes a stale snapshot. Re-running once peers exist lets each
+    /// device pull the union of everyone's registrations before adding
+    /// itself, so devices stop overwriting each other.
     pub(crate) fn schedule_device_publish(&self) {
         use canopee_storage::AppPointerRecord as Apr;
 
@@ -533,6 +707,7 @@ impl Runtime {
         let registry_key = Self::device_registry_key(&self.device_key.peer_id());
         let registry_value = identity_id.to_string().into_bytes();
 
+        let runtime = self.clone();
         tokio::spawn(async move {
             for _ in 0..50 {
                 if let Ok(peers) = network.peers().await {
@@ -557,6 +732,16 @@ impl Runtime {
                     }
                 }
             }
+
+            // Now that peers exist, merge their device lists and republish so
+            // every device of this identity converges on the same set.
+            runtime.register_device().await;
+
+            // A third device may only have come up after the first merge, so
+            // settle once more a little later rather than trusting a single
+            // early sample of who was online.
+            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+            runtime.register_device().await;
         });
     }
 

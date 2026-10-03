@@ -30,6 +30,7 @@ pub struct ObjectInfo {
     pub size: u64,
     pub verified: bool,
     pub name: Option<String>,
+    pub object_type: ObjectType,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -177,4 +178,3 @@ impl Export for Object {
         })
     }
 }
-

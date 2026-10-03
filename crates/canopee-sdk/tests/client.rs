@@ -37,7 +37,10 @@ async fn app_uses_identity_storage_and_network_via_sdk() {
     assert!(identity.to_string().starts_with("canopee://identity/"));
 
     // storage
-    let id = client.put(b"hello from an app".to_vec(), None).await.unwrap();
+    let id = client
+        .put(b"hello from an app".to_vec(), None)
+        .await
+        .unwrap();
     let object = client.get(id.clone()).await.unwrap();
     assert_eq!(object.payload.data, b"hello from an app");
 
@@ -71,7 +74,10 @@ async fn app_uses_identity_storage_and_network_via_sdk() {
     // ---- user records over the socket ----
 
     // Generic pointer round-trip through the cache-aware Runtime layer.
-    client.publish_pointer("app:demo", id.clone()).await.unwrap();
+    client
+        .publish_pointer("app:demo", id.clone())
+        .await
+        .unwrap();
     let record = client
         .resolve_pointer(identity.clone(), "app:demo")
         .await
@@ -172,10 +178,12 @@ async fn capabilities_grant_list_check_revoke() {
 
     // Nothing issued yet.
     assert!(client.list_capabilities().await.unwrap().is_none());
-    assert!(!client
-        .check_access(&bob, Permission::Read, &resource)
-        .await
-        .unwrap());
+    assert!(
+        !client
+            .check_access(&bob, Permission::Read, &resource)
+            .await
+            .unwrap()
+    );
 
     // Grant read+write on the channel to bob, never expiring.
     let cap = client
@@ -200,36 +208,52 @@ async fn capabilities_grant_list_check_revoke() {
     assert!(valid, "fresh grant must check valid: {reason}");
 
     // Issuer-side authorization: bob may read and write, may not publish.
-    assert!(client
-        .check_access(&bob, Permission::Read, &resource)
-        .await
-        .unwrap());
-    assert!(client
-        .check_access(&bob, Permission::Write, &resource)
-        .await
-        .unwrap());
-    assert!(!client
-        .check_access(&bob, Permission::Publish, &resource)
-        .await
-        .unwrap());
+    assert!(
+        client
+            .check_access(&bob, Permission::Read, &resource)
+            .await
+            .unwrap()
+    );
+    assert!(
+        client
+            .check_access(&bob, Permission::Write, &resource)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !client
+            .check_access(&bob, Permission::Publish, &resource)
+            .await
+            .unwrap()
+    );
     // Someone else, or another resource: denied.
-    assert!(!client
-        .check_access(&IdentityId::new("canopee://identity/mallory"), Permission::Read, &resource)
-        .await
-        .unwrap());
-    assert!(!client
-        .check_access(&bob, Permission::Read, &Resource::Channel("other".into()))
-        .await
-        .unwrap());
+    assert!(
+        !client
+            .check_access(
+                &IdentityId::new("canopee://identity/mallory"),
+                Permission::Read,
+                &resource
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        !client
+            .check_access(&bob, Permission::Read, &Resource::Channel("other".into()))
+            .await
+            .unwrap()
+    );
 
     // Revoke: the grant deactivates for access checks and bundle checks alike.
     client.revoke_capability(&cap.id).await.unwrap();
     let index = client.list_capabilities().await.unwrap().unwrap();
     assert!(index.entries[0].revoked);
-    assert!(!client
-        .check_access(&bob, Permission::Read, &resource)
-        .await
-        .unwrap());
+    assert!(
+        !client
+            .check_access(&bob, Permission::Read, &resource)
+            .await
+            .unwrap()
+    );
     let (valid, reason) = client.check_capability(&cap).await.unwrap();
     assert!(!valid, "revoked grant must not check valid: {reason}");
     assert!(reason.contains("revoked"));

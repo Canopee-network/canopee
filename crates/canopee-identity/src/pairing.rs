@@ -122,6 +122,19 @@ pub fn decrypt_payload(framed: &[u8], session_key: &[u8; KEY_LEN]) -> Result<Vec
         .map_err(|_| anyhow::anyhow!("wrong pairing code or tampered pairing payload"))
 }
 
+/// Builds the identity a *second device* ends up with after pairing: the
+/// raw key bytes copied over, imported fresh on the other machine.
+///
+/// Pairing works precisely because `export_bytes` → `import_bytes` yields
+/// an identity with the same id *and* the same derived X25519 key — which
+/// is what makes object encryption readable on every one of your devices.
+/// This helper reproduces that so the property can be asserted directly.
+#[cfg(test)]
+pub(crate) fn paired_clone_for_test(source: &crate::Identity) -> crate::Identity {
+    let bytes = source.export_bytes().unwrap();
+    crate::Identity::import_bytes(&bytes).unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,9 +168,18 @@ mod tests {
     fn codes_match_is_constant_time_and_case_sensitive() {
         let code = generate_code();
         assert!(codes_match(&code, &code), "identical codes must match");
-        assert!(!codes_match(&code, "ZZZZZZZZZZZZ"), "different codes must not match");
-        assert!(!codes_match(&code, &code.to_lowercase()), "base32 is case-sensitive");
-        assert!(!codes_match(&code, &code[..11]), "length mismatch must not match");
+        assert!(
+            !codes_match(&code, "ZZZZZZZZZZZZ"),
+            "different codes must not match"
+        );
+        assert!(
+            !codes_match(&code, &code.to_lowercase()),
+            "base32 is case-sensitive"
+        );
+        assert!(
+            !codes_match(&code, &code[..11]),
+            "length mismatch must not match"
+        );
     }
 
     #[test]

@@ -129,6 +129,42 @@ impl CanopeeClient {
         }
     }
 
+    /// This node's own X25519 DH public key — the value a peer needs in order
+    /// to share objects to you (`canopee contact add <name> <peer-id> <key>`).
+    pub async fn dh_public_key(&self) -> anyhow::Result<[u8; 32]> {
+        match self.request(NodeCommand::DhPublicKey).await? {
+            NodeResponse::DhPublicKey { key } => Ok(key),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Stores an object unencrypted. Only for app artifacts (manifests,
+    /// entrypoints, assets), which the edge must read to serve your app.
+    pub async fn put_object_public(
+        &self,
+        data: Vec<u8>,
+        object_type: ObjectType,
+        name: Option<String>,
+    ) -> anyhow::Result<ObjectId> {
+        match self
+            .request(NodeCommand::PutObjectPublic {
+                data,
+                object_type,
+                name,
+            })
+            .await?
+        {
+            NodeResponse::ObjectCreated { id } => Ok(id),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// [`Self::put_object_public`] for an app asset file.
+    pub async fn put_public_file(&self, name: &str, data: Vec<u8>) -> anyhow::Result<ObjectId> {
+        self.put_object_public(data, ObjectType::Blob, Some(name.to_string()))
+            .await
+    }
+
     pub async fn put_file(&self, name: &str, data: Vec<u8>) -> anyhow::Result<ObjectId> {
         let response = self
             .request(NodeCommand::PutObject {
@@ -425,12 +461,11 @@ impl CanopeeClient {
     /// Resolves which device `PeerId` to dial to reach `owner`, via the
     /// owner's `(owner, "devices")` list. `None` when the owner has no
     /// registered device.
-    pub async fn resolve_owner_device(
-        &self,
-        owner: &IdentityId,
-    ) -> anyhow::Result<Option<String>> {
+    pub async fn resolve_owner_device(&self, owner: &IdentityId) -> anyhow::Result<Option<String>> {
         match self
-            .request(NodeCommand::ResolveOwnerDevice { owner: owner.clone() })
+            .request(NodeCommand::ResolveOwnerDevice {
+                owner: owner.clone(),
+            })
             .await?
         {
             NodeResponse::OwnerDevice { peer_id } => Ok(peer_id),
@@ -473,11 +508,7 @@ impl CanopeeClient {
     /// carrying the identity: verifies the user-typed `code` against the QR
     /// data, encrypts the identity + user records, and delivers them to the
     /// new device over the LAN. Returns the new device's status message.
-    pub async fn pair_complete(
-        &self,
-        qr: PairingQrData,
-        code: String,
-    ) -> anyhow::Result<String> {
+    pub async fn pair_complete(&self, qr: PairingQrData, code: String) -> anyhow::Result<String> {
         match self
             .request(NodeCommand::CompletePairing { qr, code })
             .await?
@@ -515,9 +546,7 @@ impl CanopeeClient {
     /// `(owner, "contacts")` record at it. Returns the new object id.
     pub async fn save_contact_list(&self, list: &ContactList) -> anyhow::Result<ObjectId> {
         match self
-            .request(NodeCommand::SaveContactList {
-                list: list.clone(),
-            })
+            .request(NodeCommand::SaveContactList { list: list.clone() })
             .await?
         {
             NodeResponse::ContactListSaved { id } => Ok(id),
@@ -585,11 +614,29 @@ impl CanopeeClient {
         object: ObjectId,
         app: Option<String>,
     ) -> anyhow::Result<ObjectId> {
+        self.share_object_for(name, object, app, &[]).await
+    }
+
+    /// Shares `object` so that each of `recipients` (identified by their X25519
+    /// DH public key, as found in a `Contact`) can read it too.
+    ///
+    /// Objects are encrypted to your own devices at rest, so another person
+    /// needs the content key wrapped for their key as well. The node therefore
+    /// publishes a per-recipient copy, whose object id differs from your local
+    /// original. With no recipients the object is shared as-is, keeping its id.
+    pub async fn share_object_for(
+        &self,
+        name: impl Into<String>,
+        object: ObjectId,
+        app: Option<String>,
+        recipients: &[[u8; 32]],
+    ) -> anyhow::Result<ObjectId> {
         match self
             .request(NodeCommand::ShareObject {
                 name: name.into(),
                 object,
                 app,
+                recipients: recipients.to_vec(),
             })
             .await?
         {
@@ -646,9 +693,7 @@ impl CanopeeClient {
     /// verifies the grant against the issuer.
     pub async fn revoke_capability(&self, id: &CapabilityId) -> anyhow::Result<()> {
         match self
-            .request(NodeCommand::RevokeCapability {
-                id: id.clone(),
-            })
+            .request(NodeCommand::RevokeCapability { id: id.clone() })
             .await?
         {
             NodeResponse::CapabilityRevoked => Ok(()),

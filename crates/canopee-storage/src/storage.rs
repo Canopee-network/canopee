@@ -99,6 +99,7 @@ impl Storage {
                 size: object.payload.metadata.size,
                 verified,
                 name: self.read_name(&id).await,
+                object_type: object.payload.object_type,
             };
             objects.push(object_info);
         }

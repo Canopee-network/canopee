@@ -1,5 +1,4 @@
 use canopee_protocol::{NodeCommand, NodeResponse};
-use canopee_sdk::{CanopeeClient, NodeClient};
 use canopee_storage::{ExportBundle, ObjectId};
 use std::path::Path;
 
@@ -10,7 +9,7 @@ pub(crate) async fn put(path: String, ids: bool) {
     let name = Path::new(&path)
         .file_name()
         .map(|n| n.to_string_lossy().into_owned());
-    let client = NodeClient::new().await.unwrap();
+    let client = super::common::node_or_exit().await;
     let response = client
         .request(NodeCommand::Put {
             data,
@@ -47,7 +46,7 @@ pub(crate) async fn put(path: String, ids: bool) {
 }
 
 pub(crate) async fn concat(ids: Vec<String>, name: Option<String>, ids_flag: bool) {
-    let client = CanopeeClient::connect().await.unwrap();
+    let client = super::common::client_or_exit().await;
     let mut object_ids: Vec<ObjectId> = Vec::with_capacity(ids.len());
     for arg in &ids {
         let (object_id, _resolved_name) = match resolve_object_arg(&client, arg).await {
@@ -60,7 +59,7 @@ pub(crate) async fn concat(ids: Vec<String>, name: Option<String>, ids_flag: boo
         object_ids.push(object_id);
     }
 
-    let node = NodeClient::new().await.unwrap();
+    let node = super::common::node_or_exit().await;
     let response = node
         .request(NodeCommand::Concat {
             ids: object_ids,
@@ -94,7 +93,7 @@ pub(crate) async fn concat(ids: Vec<String>, name: Option<String>, ids_flag: boo
 }
 
 pub(crate) async fn get(id: String, output: Option<String>) {
-    let client = CanopeeClient::connect().await.unwrap();
+    let client = super::common::client_or_exit().await;
     let (object_id, resolved_name) = match resolve_object_arg(&client, &id).await {
         Ok(resolved) => resolved,
         Err(e) => {
@@ -131,7 +130,7 @@ pub(crate) async fn get(id: String, output: Option<String>) {
 }
 
 pub(crate) async fn desc(id: String, ids: bool) {
-    let client = CanopeeClient::connect().await.unwrap();
+    let client = super::common::client_or_exit().await;
     let (object_id, resolved_name) = match resolve_object_arg(&client, &id).await {
         Ok(resolved) => resolved,
         Err(e) => {
@@ -190,7 +189,7 @@ pub(crate) async fn desc(id: String, ids: bool) {
 }
 
 pub(crate) async fn list(ids: bool) {
-    let client = NodeClient::new().await.unwrap();
+    let client = super::common::node_or_exit().await;
     let response = client.request(NodeCommand::List).await.unwrap();
 
     match response {
@@ -234,7 +233,7 @@ pub(crate) async fn list(ids: bool) {
 
 pub(crate) async fn export(id: String) {
     let object_id = ObjectId::new(&id);
-    let client = NodeClient::new().await.unwrap();
+    let client = super::common::node_or_exit().await;
     let response = client
         .request(NodeCommand::Export { id: object_id })
         .await
@@ -255,7 +254,7 @@ pub(crate) async fn export(id: String) {
 pub(crate) async fn import(path: String) {
     let bytes = tokio::fs::read(path).await.unwrap();
     let bundle: ExportBundle = bincode::deserialize(&bytes).unwrap();
-    let client = NodeClient::new().await.unwrap();
+    let client = super::common::node_or_exit().await;
     let response = client
         .request(NodeCommand::Import { bundle })
         .await

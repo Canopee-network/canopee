@@ -82,7 +82,7 @@ pub(crate) async fn publish(directory: String) {
         }
     };
     let manifest_id = match client
-        .put_object(bytes, ObjectType::AppManifest, Some(app_name.clone()))
+        .put_object_public(bytes, ObjectType::AppManifest, Some(app_name.clone()))
         .await
     {
         Ok(object_id) => object_id,

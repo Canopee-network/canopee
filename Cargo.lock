@@ -431,11 +431,15 @@ dependencies = [
  "anyhow",
  "argon2",
  "chacha20poly1305",
+ "hkdf",
  "libp2p",
  "rand_core 0.6.4",
  "serde",
+ "sha2",
+ "thiserror 2.0.19",
  "tokio",
  "x25519-dalek 3.0.0",
+ "zeroize",
 ]
 
 [[package]]

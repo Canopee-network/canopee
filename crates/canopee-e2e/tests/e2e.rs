@@ -64,7 +64,10 @@ impl TestNode {
         cmd.env("HOME", home)
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err));
-        if !extra_env.iter().any(|(k, _)| *k == "CANOPEE_EDGE_HTTP_PORT") {
+        if !extra_env
+            .iter()
+            .any(|(k, _)| *k == "CANOPEE_EDGE_HTTP_PORT")
+        {
             cmd.env("CANOPEE_EDGE", "0");
         }
         for (k, v) in extra_env {
@@ -315,7 +318,9 @@ fn free_port() -> u16 {
 
 /// Streams a child pipe's lines into a channel so the test can wait for
 /// specific output with a deadline.
-fn spawn_line_reader(out: impl std::io::Read + Send + 'static) -> std::sync::mpsc::Receiver<String> {
+fn spawn_line_reader(
+    out: impl std::io::Read + Send + 'static,
+) -> std::sync::mpsc::Receiver<String> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         use std::io::BufRead;
@@ -579,13 +584,40 @@ fn two_nodes_share_and_unshare_end_to_end() {
         };
         assert!(named, "B's `canopee peers` never showed A's username");
 
-        // 4. A shares the file under a name.
-        a.cli_ok(&["share", "hello.txt", &object_id]);
+        // 4. A shares the file under a name, naming B as a recipient.
+        //
+        // Objects are encrypted to A's own devices, so B needs the content key
+        // wrapped for B's key too: A records B as a contact and shares with
+        // `--to`. That publishes a per-recipient copy under its own id (objects
+        // are addressed by their ciphertext), which is what actually goes on
+        // the DHT from here on.
+        // B's DH key comes from B's identity directly — it must not depend on
+        // B having published a profile.
+        let bob_dh = b.cli_ok(&["dh-key"]);
+        assert!(
+            !bob_dh.trim().is_empty()
+                && bob_dh.trim()
+                    != "0000000000000000000000000000000000000000000000000000000000000000",
+            "B's dh-key must be a real key, got {:?}",
+            bob_dh.trim()
+        );
+        a.cli_ok(&["contact-add", "bob-e2e", &b.device_peer_id(), &bob_dh]);
+        a.cli_ok(&["share", "hello.txt", &object_id, "--to", "bob-e2e"]);
+
+        let home_after_share = a.cli_ok(&["home", "--ids"]);
+        let shared_id = home_after_share
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("Object: ").map(|s| s.to_string()))
+            .unwrap_or_else(|| panic!("home index exposed no object id: {home_after_share}"));
+        assert_ne!(
+            shared_id, object_id,
+            "a per-recipient copy must get its own id, distinct from A's local original"
+        );
 
         // 5. B discovers A as a provider on the DHT and fetches the object.
         let deadline = Instant::now() + DHT_TIMEOUT;
         let found = loop {
-            let (_, out, _) = b.cli(&["find-providers", &object_id]);
+            let (_, out, _) = b.cli(&["find-providers", &shared_id]);
             if out.lines().any(|l| l.trim() == device_a) {
                 break true;
             }
@@ -598,11 +630,27 @@ fn two_nodes_share_and_unshare_end_to_end() {
 
         // Fetch by username, not by raw peer id: the CLI reverse-resolves
         // "alice-e2e" through the registry before fetching.
-        b.cli_ok(&["fetch", "alice-e2e", &object_id]);
+        b.cli_ok(&["fetch", "alice-e2e", &shared_id]);
         let list = b.cli_ok(&["list", "--ids"]);
         assert!(
-            list.contains(&object_id),
+            list.contains(&shared_id),
             "B must hold the object after fetching: {list}"
+        );
+
+        // 5a. The point of the whole exercise: B holds ciphertext it was
+        // never able to encrypt, and still reads the original bytes back. A
+        // different identity, over the DHT, via a relay, without ever holding
+        // A's keys.
+        let contents = b.cli_ok(&["get", &shared_id]);
+        assert_eq!(
+            contents.trim(),
+            "hello over the p2p wire",
+            "B must decrypt the object A shared to it"
+        );
+        // B's stored copy is genuinely encrypted, not plaintext handed over.
+        assert!(
+            !contents.contains("CNP1"),
+            "the decrypted view must not expose the envelope"
         );
 
         // 5b. Fetch by *name*, ids never needed: B resolves A's
@@ -624,21 +672,27 @@ fn two_nodes_share_and_unshare_end_to_end() {
         assert!(name_fetched, "B never fetched hello.txt by name");
         let list = b.cli_ok(&["list", "--ids"]);
         assert!(
-            list.contains("hello.txt") && list.contains(&object_id),
+            list.contains("hello.txt") && list.contains(&shared_id),
             "the name-fetched object must list by name (and id with --ids): {list}"
         );
 
         // 6. A's home index shows the shared entry.
         let home = a.cli_ok(&["home"]);
-        assert!(home.contains("hello.txt"), "home must list the entry: {home}");
+        assert!(
+            home.contains("hello.txt"),
+            "home must list the entry: {home}"
+        );
         assert!(home.contains("Shared: yes"), "entry must be shared: {home}");
 
         // 7. Unshare: the gate closes again.
         a.cli_ok(&["unshare", "hello.txt"]);
         let home = a.cli_ok(&["home"]);
-        assert!(home.contains("Shared: no"), "entry must be unshared: {home}");
+        assert!(
+            home.contains("Shared: no"),
+            "entry must be unshared: {home}"
+        );
 
-        let (ok, _, _) = b.cli(&["fetch", &identity_a, &object_id]);
+        let (ok, _, _) = b.cli(&["fetch", &identity_a, &shared_id]);
         // B already holds a copy, but A must refuse to serve it again.
         assert!(!ok, "fetching an unshared object must be refused");
     }));
@@ -836,7 +890,10 @@ fn two_nodes_pair_over_lan() {
     let identity_b = b.identity_id();
     let device_a = a.device_peer_id();
     let device_b_origin = b.device_peer_id();
-    assert_ne!(identity_a, identity_b, "two fresh nodes have distinct identities");
+    assert_ne!(
+        identity_a, identity_b,
+        "two fresh nodes have distinct identities"
+    );
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // 1. New-device side: B prints a pairing code + QR payload.
@@ -1090,13 +1147,21 @@ fn publish_app_over_edge_end_to_end() {
         }
 
         // 3. An unregistered subdomain is not served.
-        let status = curl_status(edge.http_port, &format!("{}.canopee.network", "0".repeat(32)), "/");
+        let status = curl_status(
+            edge.http_port,
+            &format!("{}.canopee.network", "0".repeat(32)),
+            "/",
+        );
         assert_eq!(status, "404", "unregistered subdomain must 404");
 
         // 4. Ctrl+C deregisters: the CLI reports it, and the edge stops
         //    routing the subdomain.
         sigint(publish.child.id());
-        wait_publish_line(&mut publish, "Application taken offline.", Duration::from_secs(15));
+        wait_publish_line(
+            &mut publish,
+            "Application taken offline.",
+            Duration::from_secs(15),
+        );
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             match publish.child.try_wait() {
@@ -1215,7 +1280,11 @@ fn publish_app_over_embedded_node_edge_end_to_end() {
             std::thread::sleep(Duration::from_millis(500));
         }
 
-        let status = curl_status(edge_http_port, &format!("{}.canopee.network", "0".repeat(32)), "/");
+        let status = curl_status(
+            edge_http_port,
+            &format!("{}.canopee.network", "0".repeat(32)),
+            "/",
+        );
         assert_eq!(status, "404", "unregistered subdomain must 404");
 
         // Ctrl+C deregisters.

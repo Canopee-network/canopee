@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use canopee_protocol::{NodeCommand, NodeResponse};
-use canopee_sdk::{CanopeeClient, NodeClient};
+use canopee_sdk::CanopeeClient;
 use canopee_storage::{AppManifest, ObjectId, ObjectType};
 
 use crate::app::{fetch_app, publish_directory, serve};
@@ -10,7 +10,7 @@ use crate::uri;
 use super::common::{open_with_default_app, resolve_object_arg, serve_app_on_http};
 
 pub(crate) async fn app_manifest(directory_path: String, name: String) {
-    let client = CanopeeClient::connect().await.unwrap();
+    let client = super::common::client_or_exit().await;
     let (entrypoint, assets) = publish_directory(&client, Path::new(&directory_path), false)
         .await
         .unwrap();
@@ -23,7 +23,7 @@ pub(crate) async fn app_manifest(directory_path: String, name: String) {
     };
     let bytes = bincode::serialize(&manifest).unwrap();
     let object_id = client
-        .put_object(bytes, ObjectType::AppManifest, Some(manifest.name.clone()))
+        .put_object_public(bytes, ObjectType::AppManifest, Some(manifest.name.clone()))
         .await
         .unwrap();
 
@@ -49,7 +49,7 @@ pub(crate) async fn app_manifest(directory_path: String, name: String) {
 
 pub(crate) async fn app_info(id: String) {
     let object_id = ObjectId::new(&id);
-    let client = NodeClient::new().await.unwrap();
+    let client = super::common::node_or_exit().await;
     let response = client
         .request(NodeCommand::Get { id: object_id })
         .await
@@ -78,7 +78,7 @@ pub(crate) async fn open(
     port: u16,
     open: bool,
 ) {
-    let client = CanopeeClient::connect().await.unwrap();
+    let client = super::common::client_or_exit().await;
 
     match (id, owner, name) {
         (Some(arg), _, _) => {

@@ -3,11 +3,11 @@
 //! answers forwarded HTTP requests from the pinned files of the identity's
 //! published app, and keeps the registration fresh with a heartbeat.
 
-use crate::http::render_response;
 use crate::Runtime;
+use crate::http::render_response;
 use canopee_network::{
-    app_subdomain, peer_id_from_multiaddr, InboundServe, Multiaddr, PeerId, ServeRegistration,
-    ServeRegistrationResponse, ServeRequest, ServeResponse,
+    InboundServe, Multiaddr, PeerId, ServeRegistration, ServeRegistrationResponse, ServeRequest,
+    ServeResponse, app_subdomain, peer_id_from_multiaddr,
 };
 use canopee_storage::{AppManifest, ObjectId};
 use std::collections::HashMap;
@@ -258,19 +258,32 @@ impl Runtime {
                 "app manifest {app_id} is not shared; publish it first so the edge can verify it"
             );
         }
+        // Manifest-referenced artifacts are encrypted like any other object, so
+        // they must be opened before their bytes can be decoded or served.
+        let manifest_object = self.open_object(
+            &self
+                .storage
+                .get_verified(&app_id)
+                .await
+                .map_err(|e| anyhow::anyhow!("app manifest {app_id} missing: {e}"))?,
+        )?;
         let manifest: AppManifest = manifest_object.decode()?;
 
-        let entrypoint = self
-            .storage
-            .get_verified(&manifest.entrypoint)
-            .await
-            .map_err(|e| anyhow::anyhow!("entrypoint for app {app_id} missing: {e}"))?;
+        // Manifest-referenced assets are encrypted like any other object, so
+        // they must be opened before their bytes can be served to a browser.
+        let entrypoint = self.open_object(
+            &self
+                .storage
+                .get_verified(&manifest.entrypoint)
+                .await
+                .map_err(|e| anyhow::anyhow!("entrypoint for app {app_id} missing: {e}"))?,
+        )?;
         let mut files: AppFiles = HashMap::new();
         files.insert("/".to_string(), entrypoint.payload.data);
         for (path, asset_id) in &manifest.assets {
             match self.storage.get_verified(asset_id).await {
                 Ok(asset) => {
-                    files.insert(path.clone(), asset.payload.data);
+                    files.insert(path.clone(), self.open_object(&asset)?.payload.data);
                 }
                 Err(e) => {
                     tracing::warn!("asset {path} of app {app_id} missing, skipping: {e}");

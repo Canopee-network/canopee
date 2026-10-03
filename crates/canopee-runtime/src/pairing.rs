@@ -4,7 +4,7 @@ use canopee_network::{
     CanopeePairingRequest, CanopeePairingResponse, InboundPairing, Multiaddr, PeerId,
 };
 use canopee_protocol::{PairingData, PairingPayload, PairingQrData, PairingRecord};
-use canopee_storage::{AppPointerRecord, Verify, RECORD_CONTACTS, RECORD_DEVICES, RECORD_PROFILE};
+use canopee_storage::{AppPointerRecord, RECORD_CONTACTS, RECORD_DEVICES, RECORD_PROFILE, Verify};
 use time::OffsetDateTime;
 
 impl Runtime {

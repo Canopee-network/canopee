@@ -1,8 +1,7 @@
 use canopee_protocol::{NodeCommand, NodeResponse};
-use canopee_sdk::{CanopeeClient, NodeClient};
 
 pub(crate) async fn identity() {
-    let client = NodeClient::new().await.unwrap();
+    let client = super::common::node_or_exit().await;
     let response = client.request(NodeCommand::Identity).await.unwrap();
 
     match response {
@@ -17,8 +16,17 @@ pub(crate) async fn identity() {
     }
 }
 
+pub(crate) async fn dh_key() {
+    use base64::Engine as _;
+    let client = super::common::client_or_exit().await;
+    match client.dh_public_key().await {
+        Ok(key) => println!("{}", base64::engine::general_purpose::STANDARD.encode(key)),
+        Err(e) => eprintln!("Error: {e}"),
+    }
+}
+
 pub(crate) async fn device() {
-    let client = CanopeeClient::connect().await.unwrap();
+    let client = super::common::client_or_exit().await;
     match client.device().await {
         Ok((peer_id, device_name)) => {
             println!("{peer_id}");
@@ -29,7 +37,7 @@ pub(crate) async fn device() {
 }
 
 pub(crate) async fn devices() {
-    let client = CanopeeClient::connect().await.unwrap();
+    let client = super::common::client_or_exit().await;
     match client.device_list().await {
         Ok(devices) => {
             if devices.is_empty() {
@@ -44,12 +52,20 @@ pub(crate) async fn devices() {
 }
 
 pub(crate) async fn profile(name: Option<String>) {
-    let client = CanopeeClient::connect().await.unwrap();
+    let client = super::common::client_or_exit().await;
     match name {
         None => match client.load_profile().await {
             Ok(Some(profile)) => {
+                use base64::Engine as _;
                 println!("Display name: {}", profile.display_name);
                 println!("Version: {}", profile.version);
+                // Public, and needed to exchange contacts: the other side
+                // feeds this to `canopee contact add` so you can share
+                // objects they can decrypt.
+                println!(
+                    "DH key: {}",
+                    base64::engine::general_purpose::STANDARD.encode(profile.dh_public_key)
+                );
             }
             Ok(None) => println!("No profile set yet"),
             Err(e) => eprintln!("Error: {e}"),
@@ -58,8 +74,15 @@ pub(crate) async fn profile(name: Option<String>) {
             let current = client.load_profile().await.unwrap_or(None);
             let profile = canopee_storage::Profile {
                 display_name: name,
-                dh_public_key: current.map(|p| p.dh_public_key).unwrap_or([0u8; 32]),
-                avatar: None,
+                // The DH key belongs to the identity, not to the profile, so it
+                // must always be the live one. Publishing an all-zero key here
+                // would make us unshareable: peers would wrap the content key
+                // for a key nobody holds, and decryption would silently fail.
+                dh_public_key: client.dh_public_key().await.unwrap_or_else(|e| {
+                    eprintln!("Error: could not read this node's DH key: {e}");
+                    std::process::exit(1);
+                }),
+                avatar: current.and_then(|p| p.avatar),
                 version: 0, // overwritten by the runtime
             };
             match client.save_profile(&profile).await {
@@ -71,7 +94,7 @@ pub(crate) async fn profile(name: Option<String>) {
 }
 
 pub(crate) async fn username(command: crate::UsernameCommand) {
-    let client = CanopeeClient::connect().await.unwrap();
+    let client = super::common::client_or_exit().await;
     match command {
         crate::UsernameCommand::Claim { username } => {
             match client.claim_username(&username).await {
@@ -106,7 +129,7 @@ pub(crate) async fn username(command: crate::UsernameCommand) {
 }
 
 pub(crate) async fn export_identity(passphrase: String, output: String) {
-    let client = CanopeeClient::connect().await.unwrap();
+    let client = super::common::client_or_exit().await;
     match client.export_identity(passphrase).await {
         Ok(bytes) => {
             tokio::fs::write(&output, &bytes).await.unwrap();
@@ -125,7 +148,7 @@ pub(crate) async fn export_identity(passphrase: String, output: String) {
 
 pub(crate) async fn import_identity(path: String, passphrase: String, overwrite: bool) {
     let bytes = tokio::fs::read(&path).await.unwrap();
-    let client = CanopeeClient::connect().await.unwrap();
+    let client = super::common::client_or_exit().await;
     match client.import_identity(bytes, passphrase, overwrite).await {
         Ok(identity_id) => {
             println!("Imported identity {identity_id}");

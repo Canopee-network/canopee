@@ -1,8 +1,8 @@
 use crate::Runtime;
 use canopee_identity::IdentityId;
 use canopee_storage::{
-    Capability, CapabilityEntry, CapabilityId, CapabilityIndex, Permission, Resource,
-    RECORD_CAPABILITIES,
+    Capability, CapabilityEntry, CapabilityId, CapabilityIndex, Permission, RECORD_CAPABILITIES,
+    Resource,
 };
 use time::OffsetDateTime;
 

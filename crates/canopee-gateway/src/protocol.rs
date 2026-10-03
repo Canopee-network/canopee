@@ -117,6 +117,10 @@ pub enum GatewayCommand {
         name: String,
         object: String,
         app: Option<String>,
+        /// Base64 X25519 DH public keys of contacts that should be able to
+        /// read the object. Empty shares to the owner's own devices only.
+        #[serde(default)]
+        recipients_b64: Vec<String>,
     },
 
     // ---- usernames ----
