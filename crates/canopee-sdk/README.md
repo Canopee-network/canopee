@@ -31,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
     let id = client.identity().await?;
     println!("connected to {id}");
 
-    let object_id = client.put(b"hello canopee".to_vec()).await?;
+    let object_id = client.put(b"hello canopee".to_vec(), None).await?;
     let object = client.get(object_id).await?;
     println!("{}", String::from_utf8_lossy(&object.payload.data));
 
@@ -49,16 +49,20 @@ format) except `subscribe`, which opens a persistent connection.
 
 ```rust
 let id: canopee_sdk::IdentityId = client.identity().await?;
+let status = client.status().await?;                  // identity + object/peer counts
 ```
 
 ### Storage
 
 ```rust
-let id = client.put(data).await?;                 // store bytes, signed by the node's identity
+let id = client.put(data, None).await?;                 // store bytes, signed by the node's identity
 let object = client.get(id.clone()).await?;         // read back, pre-verified
 let objects = client.list().await?;                 // everything in local storage
 let bundle = client.export(id.clone()).await?;       // portable, self-verifying bundle
 client.import(bundle).await?;                        // bring a bundle into local storage
+client.set_name(id.clone(), "greeting").await?;      // sidecar name, resolvable without the id
+let joined = client.concat(vec![a, b], Some("ab".into())).await?; // verified join of several payloads
+client.delete_object(id).await?;                     // drop it from local storage
 ```
 
 ### Network
@@ -89,10 +93,18 @@ let record = client.resolve_pointer(owner_id, "app:demo").await?;
 // as RECORD_PROFILE / RECORD_CONTACTS / RECORD_HOME).
 let id = client.save_profile(&profile).await?;
 let profile = client.load_profile().await?;          // Option<Profile>
+let theirs = client.resolve_profile(&owner_id).await?; // another identity's latest profile
 client.save_contact_list(&list).await?;
 let list = client.load_contact_list().await?;        // Option<ContactList>
 client.save_home_index(&index).await?;
 let index = client.load_home_index().await?;         // Option<HomeIndex>
+
+// Devices carrying this identity ("which machines am I on").
+let (peer_id, name) = client.device().await?;
+let devices = client.device_list().await?;
+client.add_device(peer_id.clone(), "laptop").await?;
+client.remove_device(peer_id).await?;
+let dialable = client.resolve_owner_device(&owner_id).await?; // Option<peer id>
 ```
 
 Saving bakes a server-side version bump and repoints the reserved record —

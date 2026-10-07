@@ -16,3 +16,4 @@ canopee-storage = { path = "../canopee-storage" }
 
 [dev-dependencies]
 canopee-node = { path = "../canopee-node" }
+serde_json = "1"

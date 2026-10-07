@@ -2,7 +2,7 @@ mod client;
 mod node_client;
 mod subscription;
 
-pub use client::CanopeeClient;
+pub use client::{CanopeeClient, NodeStatus};
 pub use node_client::NodeClient;
 pub use subscription::Subscription;
 

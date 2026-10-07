@@ -17,6 +17,14 @@ pub struct CanopeeClient {
     node: NodeClient,
 }
 
+/// Snapshot returned by [`CanopeeClient::status`].
+#[derive(Debug, Clone)]
+pub struct NodeStatus {
+    pub identity: String,
+    pub objects: usize,
+    pub peers: usize,
+}
+
 impl CanopeeClient {
     /// Connects to the local Canopee node. Returns an error if the node
     /// isn't running (call `canopee start` / `canopee-node` first).
@@ -40,6 +48,23 @@ impl CanopeeClient {
     }
 
     // ---- identity ----
+
+    /// A one-shot snapshot of the node: its identity plus how many objects
+    /// and peers it currently sees. Cheap liveness/health probe.
+    pub async fn status(&self) -> anyhow::Result<NodeStatus> {
+        match self.request(NodeCommand::Status).await? {
+            NodeResponse::Status {
+                identity,
+                objects,
+                peers,
+            } => Ok(NodeStatus {
+                identity,
+                objects,
+                peers,
+            }),
+            other => Err(Self::unexpected(other)),
+        }
+    }
 
     /// The identity of the local node this client is connected to.
     pub async fn identity(&self) -> anyhow::Result<IdentityId> {
@@ -208,6 +233,29 @@ impl CanopeeClient {
     pub async fn import(&self, bundle: ExportBundle) -> anyhow::Result<()> {
         match self.request(NodeCommand::Import { bundle }).await? {
             NodeResponse::Imported => Ok(()),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Concatenates the payloads of `ids` (each verified by the node before
+    /// use) into one new blob, stores it, and replicates it to connected
+    /// peers. Returns the new object's id.
+    pub async fn concat(
+        &self,
+        ids: Vec<ObjectId>,
+        name: Option<String>,
+    ) -> anyhow::Result<ObjectId> {
+        match self.request(NodeCommand::Concat { ids, name }).await? {
+            NodeResponse::Concatenated { id } => Ok(id),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Removes a stored object from local storage. Announcements/records that
+    /// point at it are not rewritten.
+    pub async fn delete_object(&self, id: ObjectId) -> anyhow::Result<()> {
+        match self.request(NodeCommand::DeleteObject { id }).await? {
+            NodeResponse::ObjectDeleted => Ok(()),
             other => Err(Self::unexpected(other)),
         }
     }
@@ -383,6 +431,22 @@ impl CanopeeClient {
         }
     }
 
+    /// Resolves another identity's latest `Profile` through the same
+    /// record+object path the node uses for its own profile (local record
+    /// cache first, then the DHT, verifying the object). `None` when nothing
+    /// verifiable is found.
+    pub async fn resolve_profile(&self, owner: &IdentityId) -> anyhow::Result<Option<Profile>> {
+        match self
+            .request(NodeCommand::ResolveProfile {
+                owner: owner.clone(),
+            })
+            .await?
+        {
+            NodeResponse::Profile { profile } => Ok(profile),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
     /// Claims a globally unique username for the node's identity, so other
     /// peers can discover and address this node by name (see
     /// [`Self::resolve_username`]). Republishing under a new name re-claims it.
@@ -454,6 +518,39 @@ impl CanopeeClient {
     pub async fn device_list(&self) -> anyhow::Result<Vec<DeviceInfo>> {
         match self.request(NodeCommand::DeviceList).await? {
             NodeResponse::DeviceList { devices } => Ok(devices),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Registers a device against the node's `(owner, "devices")` list and
+    /// republishes it — the "admit this machine" half of pairing/bonding.
+    pub async fn add_device(
+        &self,
+        device_id: impl Into<String>,
+        device_name: impl Into<String>,
+    ) -> anyhow::Result<()> {
+        match self
+            .request(NodeCommand::AddDevice {
+                device_id: device_id.into(),
+                device_name: device_name.into(),
+            })
+            .await?
+        {
+            NodeResponse::DeviceAdded => Ok(()),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Removes a device from the node's `(owner, "devices")` list and
+    /// republishes it.
+    pub async fn remove_device(&self, device_id: impl Into<String>) -> anyhow::Result<()> {
+        match self
+            .request(NodeCommand::RemoveDevice {
+                device_id: device_id.into(),
+            })
+            .await?
+        {
+            NodeResponse::DeviceRemoved => Ok(()),
             other => Err(Self::unexpected(other)),
         }
     }

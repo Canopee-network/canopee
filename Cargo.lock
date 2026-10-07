@@ -520,6 +520,7 @@ dependencies = [
  "canopee-protocol",
  "canopee-storage",
  "serde",
+ "serde_json",
  "tokio",
 ]
 

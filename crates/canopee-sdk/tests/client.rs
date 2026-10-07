@@ -155,6 +155,76 @@ async fn app_uses_identity_storage_and_network_via_sdk() {
 /// access, and deactivate on revocation — the vision §5.5 lifecycle without
 /// any central authorization server.
 #[tokio::test]
+async fn additional_wrappers_roundtrip() {
+    let _guard = HOME_LOCK.lock().unwrap();
+    let home = std::env::temp_dir().join(format!("canopee_sdk_wrap_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    unsafe { std::env::set_var("HOME", &home) };
+
+    let node = Node::open().await.unwrap();
+    let node_for_task = node.clone();
+    tokio::spawn(async move {
+        let _ = node_for_task.run().await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let client = CanopeeClient::connect().await.unwrap();
+    let identity = client.identity().await.unwrap();
+
+    // status / concat / delete.
+    let status = client.status().await.unwrap();
+    assert_eq!(status.identity, identity.to_string());
+    let a = client.put(b"hello ".to_vec(), None).await.unwrap();
+    let b = client.put(b"world".to_vec(), None).await.unwrap();
+    let joined = client
+        .concat(vec![a.clone(), b.clone()], Some("greeting".into()))
+        .await
+        .unwrap();
+    assert_ne!(joined, a);
+    let object = client.get(joined.clone()).await.unwrap();
+    assert_eq!(object.payload.data, b"hello world");
+    client.delete_object(joined.clone()).await.unwrap();
+    assert!(client.get(joined).await.is_err(), "deleted object is gone");
+
+    // device registration reflects in the device list (the node registers its
+    // own device at startup, so register a distinct one).
+    let other = "12D3KooWOtherWrapTestDevice".to_string();
+    let before = client.device_list().await.unwrap();
+    assert!(
+        !before.iter().any(|d| d.device_id == other),
+        "test device unregistered"
+    );
+    client.add_device(other.clone(), "wrap-test").await.unwrap();
+    let after = client.device_list().await.unwrap();
+    assert!(after.iter().any(|d| d.device_id == other));
+    client.remove_device(other.clone()).await.unwrap();
+    let after_rm = client.device_list().await.unwrap();
+    assert!(!after_rm.iter().any(|d| d.device_id == other));
+
+    // profile resolves locally once saved (same identity).
+    assert!(client.resolve_profile(&identity).await.unwrap().is_none());
+    client.save_profile(&profile_for_test()).await.unwrap();
+    let theirs = client
+        .resolve_profile(&identity)
+        .await
+        .unwrap()
+        .expect("own profile resolves through the shared path");
+    assert_eq!(theirs.display_name, "alice");
+
+    let _ = client.shutdown().await;
+}
+
+fn profile_for_test() -> Profile {
+    Profile {
+        display_name: "alice".into(),
+        dh_public_key: [7u8; 32],
+        avatar: None,
+        version: 0,
+    }
+}
+
+#[tokio::test]
 async fn capabilities_grant_list_check_revoke() {
     let _guard = HOME_LOCK.lock().unwrap();
     let home = std::env::temp_dir().join(format!("canopee_sdk_cap_test_{}", std::process::id()));

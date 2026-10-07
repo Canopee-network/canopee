@@ -154,7 +154,6 @@ impl Node {
     }
 
     async fn read_command(&self, stream: &mut UnixStream) -> anyhow::Result<NodeCommand> {
-        println!("stream: {:? }", stream);
         let size = stream.read_u32().await?;
         let mut buffer = vec![0u8; size as usize];
         stream.read_exact(&mut buffer).await?;
@@ -168,7 +167,6 @@ impl Node {
         stream: &mut UnixStream,
         response: NodeResponse,
     ) -> anyhow::Result<()> {
-        println!("response: {:? }", response);
         let bytes = bincode::serialize(&response)?;
         stream.write_u32(bytes.len() as u32).await?;
         stream.write_all(&bytes).await?;
