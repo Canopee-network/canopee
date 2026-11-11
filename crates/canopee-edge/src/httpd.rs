@@ -130,7 +130,11 @@ async fn handle_client(
 /// Reads one browser request (request line + headers). Returns `Ok(None)` on
 /// EOF or idle timeout, meaning the connection is done.
 async fn read_request(
-    reader: &mut BufReader<tokio::io::ReadHalf<tokio_util::either::Either<tokio_rustls::server::TlsStream<TcpStream>, TcpStream>>>,
+    reader: &mut BufReader<
+        tokio::io::ReadHalf<
+            tokio_util::either::Either<tokio_rustls::server::TlsStream<TcpStream>, TcpStream>,
+        >,
+    >,
 ) -> std::io::Result<Option<Request>> {
     loop {
         let mut request_line = String::new();
@@ -210,10 +214,7 @@ async fn read_request(
 /// simply yields a username that no publisher has claimed.
 fn host_subdomain(host: &str) -> String {
     let host = host.split(':').next().unwrap_or(host).trim();
-    host.split('.')
-        .next()
-        .unwrap_or(host)
-        .to_ascii_lowercase()
+    host.split('.').next().unwrap_or(host).to_ascii_lowercase()
 }
 
 /// Routes the request to the registered publisher for its `Host` subdomain
@@ -265,7 +266,10 @@ fn not_found(message: &str) -> ServeResponse {
     ServeResponse {
         status: "404 Not Found".into(),
         headers: vec![
-            ("Content-Type".to_string(), "text/plain; charset=utf-8".to_string()),
+            (
+                "Content-Type".to_string(),
+                "text/plain; charset=utf-8".to_string(),
+            ),
             ("Content-Length".to_string(), message.len().to_string()),
         ],
         body: message.as_bytes().to_vec(),
@@ -276,7 +280,9 @@ fn not_found(message: &str) -> ServeResponse {
 /// the edge owns (`Connection`, plus `Content-Length` when the publisher left
 /// it off and the status code needs one).
 async fn write_response(
-    writer: &mut tokio::io::WriteHalf<tokio_util::either::Either<tokio_rustls::server::TlsStream<TcpStream>, TcpStream>>,
+    writer: &mut tokio::io::WriteHalf<
+        tokio_util::either::Either<tokio_rustls::server::TlsStream<TcpStream>, TcpStream>,
+    >,
     request: &Request,
     response: &ServeResponse,
 ) -> anyhow::Result<()> {
@@ -314,7 +320,11 @@ async fn write_response(
 }
 
 async fn read_line_with_timeout(
-    reader: &mut BufReader<tokio::io::ReadHalf<tokio_util::either::Either<tokio_rustls::server::TlsStream<TcpStream>, TcpStream>>>,
+    reader: &mut BufReader<
+        tokio::io::ReadHalf<
+            tokio_util::either::Either<tokio_rustls::server::TlsStream<TcpStream>, TcpStream>,
+        >,
+    >,
     buf: &mut String,
 ) -> std::io::Result<Option<usize>> {
     match tokio::time::timeout(KEEP_ALIVE_IDLE_TIMEOUT, reader.read_line(buf)).await {

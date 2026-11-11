@@ -104,6 +104,35 @@ impl SyncResult {
     }
 }
 
+/// One Canopee Sync root as seen by this device. `path` is the local folder
+/// mapping (`None` if the root exists in the account index but has not been
+/// joined on this device).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncRootInfo {
+    pub name: String,
+    pub root_id: String,
+    pub path: Option<String>,
+    pub revision: u64,
+    pub manifest: Option<ObjectId>,
+    pub last_sync_at: Option<u64>,
+}
+
+/// Outcome of one sync pass over one root.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncRunResult {
+    pub root: String,
+    pub uploaded: usize,
+    pub downloaded: usize,
+    pub removed: usize,
+    pub conflicts: usize,
+}
+
+impl SyncRunResult {
+    pub fn changed(&self) -> bool {
+        self.uploaded > 0 || self.downloaded > 0 || self.removed > 0 || self.conflicts > 0
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum NodeCommand {
     Put {
@@ -374,6 +403,37 @@ pub enum NodeCommand {
     /// Deregisters the current serve session with the edge and stops its
     /// heartbeat. No-op when no session is running.
     StopServeSession,
+    /// Creates a Canopee Sync root at `path` under `name` (defaulting to the
+    /// directory name), publishes the encrypted root index, and starts
+    /// tracking the folder on this device.
+    SyncCreate {
+        path: String,
+        name: Option<String>,
+    },
+    /// Maps an existing account sync root `name` to the local folder `path`
+    /// and pulls its current manifest. The destination must be empty or
+    /// missing.
+    SyncJoin {
+        name: String,
+        path: String,
+    },
+    /// Lists the sync roots known to this device, with local mappings and
+    /// current revisions.
+    SyncList,
+    /// Shows one root's status, or every root when `name` is omitted.
+    SyncStatus {
+        name: Option<String>,
+    },
+    /// Runs one pull/push pass for `name`, or for every local root when
+    /// omitted. Returns per-root counters.
+    SyncNow {
+        name: Option<String>,
+    },
+    /// Removes the local folder mapping for `name`. Remote data and other
+    /// devices' mappings are untouched.
+    SyncRemove {
+        name: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -536,4 +596,22 @@ pub enum NodeResponse {
     /// Confirms `StopServeSession` ended the previous session (or that none
     /// was running).
     ServeSessionStopped,
+    /// The response to `SyncCreate`: the new root's local + account state.
+    SyncRootCreated {
+        info: SyncRootInfo,
+    },
+    /// The response to `SyncJoin`: the joined root's state.
+    SyncRootJoined {
+        info: SyncRootInfo,
+    },
+    /// The response to `SyncList` / `SyncStatus`.
+    SyncRoots {
+        roots: Vec<SyncRootInfo>,
+    },
+    /// The response to `SyncNow`: one result per root processed.
+    SyncCompleted {
+        results: Vec<SyncRunResult>,
+    },
+    /// Confirms `SyncRemove` dropped the local mapping.
+    SyncRootRemoved,
 }

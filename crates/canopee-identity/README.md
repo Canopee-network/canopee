@@ -118,7 +118,7 @@ Important:
 ## Key agreement (X25519)
 
 Signing proves who sent something; it doesn't make it private (see
-[`security-considerations.md`](../../docs/security-considerations.md)).
+[Security](../../docs/concepts/security.md)).
 `dh_public_key()`/`agree()` add the other half — a way for two identities to
 derive a shared secret, as the basis for end-to-end encryption built by
 whatever's layered on top (e.g. a chat app's session/ratchet logic). This

@@ -70,25 +70,51 @@ canopee device      # different peer id + device name on EACH
 canopee devices     # both machines listed on the source's identity
 ```
 
-## Step 2: after pairing — device list and sync
+## Step 2: after pairing — device list and record sync
 
 Devices register themselves in the `(owner, "devices")` record the moment a
 runtime starts (`register_device`), and each publishes a
 `device:<peer-id> → identity` registry record so peers can reverse-resolve
 "whose device is this."
 
-Since all your devices publish into the same DHT keys, sync is a
-**last-writer-wins** over the DHT:
+User records (profile, contacts, devices, home index) are refreshed from the
+DHT and are **last-writer-wins**:
 
 ```bash
-canopee sync              # refresh records from every registered device
-canopee sync <peer-id>    # refresh from one specific peer
+canopee sync records              # refresh records from every registered device
+canopee sync records <peer-id>    # refresh from one specific peer
 ```
 
-A background task also syncs periodically while the node is online
-(`spawn_periodic_sync` in `crates/canopee-runtime/src/sync.rs`). Objects you
-put on one device become fetchable on the other through the normal sharing
-path once the peer is connected.
+A background task also syncs records periodically while the node is online
+(`spawn_periodic_sync` in `crates/canopee-runtime/src/sync.rs`). This does not
+make arbitrary stored objects shared; normal serving rules still apply.
+
+## Step 3: folder sync (optional)
+
+To keep an actual directory in step, use Canopee Sync. On the first device:
+
+```bash
+canopee sync create ~/Documents --name docs
+```
+
+On another paired device:
+
+```bash
+canopee sync join docs ~/Documents
+canopee sync now docs
+canopee sync status docs
+```
+
+`join` preserves files already in the destination and uploads them as local
+additions. The encrypted index/manifests live behind `(owner, "sync")`; local
+folder mappings live in `~/.canopee/sync/roots.bin`.
+
+Folder sync uses a recursive watcher with ~500 ms debounce while the node is
+started and connected; a 30-second periodic pass is the fallback, and
+`canopee sync now` forces one.
+If both devices edit the same path, one version wins at the original path and
+the other is kept as `<name>.conflict-<UTC-millis>`. See
+[Canopee Sync v1](../reference/sync-v1.md) for the remaining gaps.
 
 ## Fallback: manual export/import (no LAN)
 
@@ -107,8 +133,8 @@ Notes, as with pairing: the passphrase is a **transfer** passphrase
 (protecting the exported envelope), the imported key takes effect after a
 restart, and `--overwrite` backs up the old key rather than deleting it.
 Unlike pairing, export/import does **not** copy your profile/contacts or
-register the new device — run `canopee sync` afterwards to pull those over
-the network.
+register the new device — run `canopee sync records` afterwards to pull those
+over the network.
 
 ## Embedded apps / SDK
 
@@ -131,8 +157,10 @@ network one).
   device from `(owner, "devices")` stops peers dialing it, but a stolen
   *device copy* of the shared account key still has valid signing keys.
 - **No delegation / tiers.** All devices are equally privileged.
-- **Cross-device sync is last-writer-wins.** Concurrent edits from two
-  devices can lose; there's no conflict resolution.
+- **User-record sync is last-writer-wins.** Concurrent record edits can lose.
+  Folder sync instead keeps both same-path versions as an original plus a
+  conflict copy, but it does not merge file contents, and concurrent manifest
+  publishers are protected only by optimistic re-resolve and retry.
 - **No account recovery.** Lose every copy of the key, lose the identity.
   Pairing and export/import are key *transfer*, not key *backup*.
 
@@ -146,5 +174,7 @@ a documented limitation, not a solved one.
 2. `canopee pair <qr> --code <code>` on the source → approve + transfer.
 3. Restart the new device; verify `identity` matches, `device` differs,
    `devices` lists both.
-4. Keep copies in sync with `canopee sync`.
-5. Different networks → `export-identity` / `import-identity` + `sync`.
+4. Keep user records fresh with `canopee sync records`.
+5. Optionally create/join a folder root with `canopee sync create` /
+   `canopee sync join`.
+6. Different networks → `export-identity` / `import-identity` + `sync records`.

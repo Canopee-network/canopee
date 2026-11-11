@@ -62,9 +62,7 @@ impl Registry {
         let subdomain = subdomain.to_ascii_lowercase();
         let now = Instant::now();
         match self.entries.lock().await.get(&subdomain) {
-            Some(entry) if now.duration_since(entry.last_seen) <= REGISTRY_TTL => {
-                Some(entry.peer)
-            }
+            Some(entry) if now.duration_since(entry.last_seen) <= REGISTRY_TTL => Some(entry.peer),
             _ => None,
         }
     }
@@ -139,11 +137,7 @@ impl Registry {
     /// timestamp must be fresh, and the manifest — fetched from the
     /// registering peer itself — must hash to `app_id` and name the signing
     /// identity as its owner.
-    async fn validate(
-        &self,
-        peer: PeerId,
-        registration: &ServeRegistration,
-    ) -> Result<(), String> {
+    async fn validate(&self, peer: PeerId, registration: &ServeRegistration) -> Result<(), String> {
         if !registration.verify() {
             return Err("registration signature does not verify".to_string());
         }

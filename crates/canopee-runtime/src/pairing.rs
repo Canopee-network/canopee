@@ -155,7 +155,7 @@ impl Runtime {
         const DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
         let addr: Multiaddr = lan_addr.parse()?;
-        self.network.dial(addr).await?;
+        let mut last_dial_error = None;
 
         for _ in 0..40 {
             if let Ok(peers) = self.network.peers().await {
@@ -163,9 +163,19 @@ impl Runtime {
                     return self.network.send_pairing(device, request).await;
                 }
             }
+            if let Err(e) = self.network.dial(addr.clone()).await {
+                last_dial_error = Some(e.to_string());
+            }
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
-        anyhow::bail!("the device at {lan_addr} did not come online within {DIAL_TIMEOUT:?}")
+        match last_dial_error {
+            Some(e) => anyhow::bail!(
+                "the device at {lan_addr} did not come online within {DIAL_TIMEOUT:?}: {e}"
+            ),
+            None => anyhow::bail!(
+                "the device at {lan_addr} did not come online within {DIAL_TIMEOUT:?}"
+            ),
+        }
     }
 
     /// Handles one inbound `/canopee/pairing/1.0.0` request on the *new*

@@ -23,8 +23,11 @@ anyone.
   chat, multi-device, publishing apps, Tauri tutorials, and more.
 - **Check the exacts:** [Reference](docs/reference/README.md) — every CLI
   command, environment variable, filesystem path, protocol, and SDK method.
+- **Canopee Sync:** [Sync v1](docs/reference/sync-v1.md) — the private
+  folder-sync contract and current implementation status.
 - **For contributors:** [`ONBOARDING.md`](ONBOARDING.md) walks through
-  building, testing, and working in this repo.
+  building, testing, and working in this repo; [`HANDOFF_RESUME.md`](HANDOFF_RESUME.md)
+  is the current work-state handoff.
 
 ## Quick start
 
@@ -61,10 +64,15 @@ println!("stored as {id}");
   mutable pointers resolve `(owner, name)` to the latest object. Your profile,
   contacts, home index, devices, username, and capabilities are all just
   records ([Objects & pointers](docs/concepts/objects.md)).
-- **Nothing shared by default.** `put` stores locally; `share` is the explicit
-  "serve this to the network" act ([Sharing](docs/concepts/sharing.md)).
-  Capabilities layer signed, verifiable grants on top for who-may-do-what
-  ([Capabilities](docs/concepts/capabilities.md)).
+- **Encrypted folder sync.** Pair your own devices and keep a folder in step
+  across them, with encrypted manifests and file blobs. The contract, current
+  behavior, and remaining hardening are in [Canopee Sync v1](docs/reference/sync-v1.md).
+- **Nothing shared by default; content encrypted by default.** `put` stores
+  locally and encrypts the payload for your identity; `share` is the explicit
+  "serve this to the network" act, and sharing to a contact re-wraps the
+  content key for them ([Sharing](docs/concepts/sharing.md)). Capabilities
+  layer signed, verifiable grants on top for who-may-do-what
+  ([Capabilities](docs/concepts/capabilities.md), [Security](docs/concepts/security.md)).
 - **Static apps as first-class objects.** Publish a directory as a signed
   manifest, announce it on the DHT, and any peer can open it in a browser
   by name ([Publishing apps](docs/guides/publishing-apps.md)).
@@ -128,6 +136,7 @@ Everything a node owns lives under `~/.canopee/` (see
 ├── identity/          # account key (the person) + device key (this machine)
 ├── storage/           # signed content-addressed objects
 ├── records/           # local cache of resolved (owner, name) pointers
+├── sync/              # device-local sync-root ↔ folder mappings
 ├── aliases/           # friendly-name → owner map for canopee:// URIs
 ├── state/             # node runtime state
 ├── cache.cache        # LRU sidecar (evicts fetched content, never your own)
@@ -142,3 +151,5 @@ This is an active work-in-progress reference implementation, not a hardened
 production system. What's implemented, what's a known limitation, and what's
 deliberately left to the app layer are spelled out in
 [Security concept](docs/concepts/security.md) and [Roadmap](docs/reference/roadmap.md).
+For the current folder-sync state and release blockers, see
+[Canopee Sync v1](docs/reference/sync-v1.md).

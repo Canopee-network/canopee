@@ -13,7 +13,7 @@ This is the whole data model. Everything else is built on top of it.
 An `Object` (`canopee-storage/src/object.rs`) is:
 
 - a blob of bytes (`data`),
-- an `ObjectType` tag (Blob, File, Profile, HomeIndex, CapabilityIndex, …),
+- an `ObjectType` tag (Blob, SyncFile, Profile, HomeIndex, CapabilityIndex, …),
 - a signature from the creator's identity key,
 - an `ObjectId` = the hash of (type + data), so any object's id is
   self-certifying.
@@ -24,6 +24,14 @@ signature against the advertised owner, and both must match.
 
 Objects are stored on disk under `~/.canopee/storage/<id>` and evicted from
 the on-node LRU cache based on `cached_bytes`.
+
+`put` / `put_object` encrypt the payload before hashing, signing, and storing.
+The resulting `id` therefore identifies ciphertext; only the owner's identity
+(and any explicit recipients) can decrypt it. Contacts and the home index are
+encrypted to the owner. App artifacts written through `put_object_public` and
+the signed discovery records (profiles, usernames, device lists, pointers,
+capability indexes) stay plaintext by design. See
+[Security](security.md#deliberately-unencrypted-data).
 
 ## Pointers
 
@@ -54,7 +62,8 @@ is the latest *immutable* object for that piece of person-level data. Because
 the pointer is signed by the owner and the object is content-addressed, a
 record is always both fresh and verifiable.
 
-The reserved record names (in `canopee-storage/src/user.rs`):
+The reserved record names (user records in `canopee-storage/src/user.rs`, plus
+the folder-sync index defined in `canopee-runtime/src/folder_sync.rs`):
 
 | Record | Pointer key | Value | Meaning |
 |---|---|---|---|
@@ -64,6 +73,7 @@ The reserved record names (in `canopee-storage/src/user.rs`):
 | Username | `(owner, "username")` | `UsernameRecord` | your globally-unique claim |
 | Devices | `(owner, "devices")` | `DeviceList` | which machines carry your identity |
 | Capabilities | `(owner, "capabilities")` | `CapabilityIndex` | grants you've issued (see [Capabilities](capabilities.md)) |
+| Folder sync | `(owner, "sync")` | encrypted `SyncRootIndex` | root name → current manifest/revision (see [Canopee Sync v1](../reference/sync-v1.md)) |
 
 Global Kademlia DHT records (not `(owner, name)` pointers) round it out:
 

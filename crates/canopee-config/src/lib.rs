@@ -155,6 +155,13 @@ impl Config {
         self.user_root.join("records")
     }
 
+    /// Device-local sync-root mappings (root name → local folder path, plus
+    /// the last applied manifest revision). Lives under the *user* root so
+    /// every app on this device sees the same folder mappings.
+    pub fn sync_path(&self) -> PathBuf {
+        self.user_root.join("sync")
+    }
+
     pub fn export_path(&self) -> PathBuf {
         self.root.join("exports")
     }

@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if)]
+
 //! The Canopee edge role: a public gateway that turns a publisher's local
 //! node into a reachable website.
 //!

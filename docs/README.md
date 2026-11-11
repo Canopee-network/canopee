@@ -10,7 +10,7 @@ Understand the model before you touch a command.
 - [Architecture](concepts/architecture.md) — nodes, identities, objects, and
   the crate map.
 - [Identity](concepts/identity.md) — one identity per person, many devices,
-  pairing, usernames, sync.
+  pairing, usernames, record sync, and folder sync.
 - [Objects & pointers](concepts/objects.md) — the content-addressed object
   model, pointers, records, the home index.
 - [Networking](concepts/networking.md) — mDNS, the DHT, relays, hole
@@ -32,7 +32,7 @@ Hands-on, command-by-command walkthroughs.
   unshare.
 - [Chatting between peers](guides/chat-between-peers.md) — live pub/sub.
 - [Multi-device identity](guides/multi-device-identity.md) — one identity on
-  many devices.
+  many devices, record refresh, and encrypted folder sync.
 - [Usernames](guides/usernames.md) — be addressable by a friendly name.
 - [Publishing static apps](guides/publishing-apps.md) — app manifests,
   pointers, open.
@@ -64,6 +64,8 @@ Exhaustive, machine-checkable detail.
 - [Protocols & DHT records](reference/protocols.md) — wire shapes and record
   keys.
 - [SDK client reference](reference/sdk.md) — the `CanopeeClient` API.
+- [Canopee Sync v1](reference/sync-v1.md) — private folder-sync contract,
+  current behavior, known deviations, and production gate.
 - [Deployment](reference/deployment.md) — the node as a systemd service and
   public relay.
 - [Roadmap](reference/roadmap.md) — published plans and app ideas.
@@ -79,3 +81,6 @@ the current guides supersede them.
 **Operational resources** live next to the code, not in this tree:
 [`deploy/README.md`](../deploy/README.md) (systemd relay install) and
 [`scripts/e2e.sh`](../scripts/e2e.sh) (the two-node e2e shell test).
+
+**Resuming development?** Read [`HANDOFF_RESUME.md`](../HANDOFF_RESUME.md) for
+the current work state, verified commands, known risks, and next milestones.

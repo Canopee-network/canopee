@@ -472,6 +472,7 @@ fn parse_object_type(s: &str) -> anyhow::Result<ObjectType> {
         "HomeIndex" => ObjectType::HomeIndex,
         "Capability" => ObjectType::Capability,
         "CapabilityIndex" => ObjectType::CapabilityIndex,
+        "SyncFile" => ObjectType::SyncFile,
         other => anyhow::bail!("unknown object type \"{other}\""),
     })
 }

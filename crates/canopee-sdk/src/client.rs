@@ -3,7 +3,7 @@ use crate::subscription::Subscription;
 use canopee_identity::IdentityId;
 use canopee_protocol::{
     DeviceInfo, NodeCommand, NodeResponse, PairingQrData, PeerInfo, RelayReservationInfo,
-    SyncResult,
+    SyncResult, SyncRootInfo, SyncRunResult,
 };
 use canopee_storage::{
     AppPointerRecord, Capability, CapabilityId, CapabilityIndex, ContactList, ExportBundle,
@@ -635,6 +635,81 @@ impl CanopeeClient {
     pub async fn sync_with_all_devices(&self) -> anyhow::Result<SyncResult> {
         match self.request(NodeCommand::SyncDeviceList).await? {
             NodeResponse::SyncComplete { result } => Ok(result),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Creates a new encrypted folder-sync root and maps it to `path` on this
+    /// device. `name` defaults to the folder's file name.
+    pub async fn sync_create_root(
+        &self,
+        path: impl Into<String>,
+        name: Option<String>,
+    ) -> anyhow::Result<SyncRootInfo> {
+        match self
+            .request(NodeCommand::SyncCreate {
+                path: path.into(),
+                name,
+            })
+            .await?
+        {
+            NodeResponse::SyncRootCreated { info } => Ok(info),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Maps an existing account sync root to a local folder and prepares it
+    /// for the next `sync_now`.
+    pub async fn sync_join_root(
+        &self,
+        name: impl Into<String>,
+        path: impl Into<String>,
+    ) -> anyhow::Result<SyncRootInfo> {
+        match self
+            .request(NodeCommand::SyncJoin {
+                name: name.into(),
+                path: path.into(),
+            })
+            .await?
+        {
+            NodeResponse::SyncRootJoined { info } => Ok(info),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Lists account sync roots with their local mappings and revisions.
+    pub async fn sync_list_roots(&self) -> anyhow::Result<Vec<SyncRootInfo>> {
+        match self.request(NodeCommand::SyncList).await? {
+            NodeResponse::SyncRoots { roots } => Ok(roots),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Shows one sync root (or every root when `name` is `None`).
+    pub async fn sync_status(&self, name: Option<String>) -> anyhow::Result<Vec<SyncRootInfo>> {
+        match self.request(NodeCommand::SyncStatus { name }).await? {
+            NodeResponse::SyncRoots { roots } => Ok(roots),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Runs one pull/push pass over `name`, or every locally mapped root when
+    /// `name` is `None`.
+    pub async fn sync_now(&self, name: Option<String>) -> anyhow::Result<Vec<SyncRunResult>> {
+        match self.request(NodeCommand::SyncNow { name }).await? {
+            NodeResponse::SyncCompleted { results } => Ok(results),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Removes this device's mapping for `name`. The folder and remote data
+    /// are untouched.
+    pub async fn sync_remove_root(&self, name: impl Into<String>) -> anyhow::Result<()> {
+        match self
+            .request(NodeCommand::SyncRemove { name: name.into() })
+            .await?
+        {
+            NodeResponse::SyncRootRemoved => Ok(()),
             other => Err(Self::unexpected(other)),
         }
     }

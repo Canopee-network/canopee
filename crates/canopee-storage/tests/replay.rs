@@ -11,7 +11,7 @@
 
 use canopee_identity::Identity;
 use canopee_storage::{Object, ObjectId, ObjectType, Storage, Verify};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 fn scratch_dir(tag: &str) -> PathBuf {
@@ -20,7 +20,7 @@ fn scratch_dir(tag: &str) -> PathBuf {
     dir
 }
 
-fn storage_in(dir: &PathBuf) -> Storage {
+fn storage_in(dir: &Path) -> Storage {
     let root = dir.join("store");
     std::fs::create_dir_all(&root).unwrap();
     Storage::new(root.to_str().unwrap())
@@ -201,11 +201,54 @@ async fn repeated_puts_are_idempotent_and_consistent() {
     assert!(back.verify());
     assert_eq!(back.payload.data, b"stable id");
     // No stray temp files may survive the second, overwriting put.
-    let dir = std::fs::read_dir(&storage.root()).unwrap();
+    let dir = std::fs::read_dir(storage.root()).unwrap();
     for entry in dir.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         if name.starts_with('.') && name.ends_with(".canopee-tmp") {
             panic!("stale temp file left behind: {name}");
         }
     }
+}
+
+#[tokio::test]
+async fn listing_cache_is_invalidated_when_files_change() {
+    let storage = storage_in(&scratch_dir("listcache"));
+    let owner = identity("listcache").await;
+
+    let object = Object::new(&owner, b"listing cache".to_vec(), ObjectType::Blob);
+    storage.put_verified(&object).await.unwrap();
+    storage.set_name(&object.id, "cached.txt").await.unwrap();
+
+    let first = storage.list_objects().await.unwrap();
+    let second = storage.list_objects().await.unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(
+        second[0].id, first[0].id,
+        "unchanged files must list identically"
+    );
+    assert!(second[0].verified);
+    assert_eq!(second[0].name.as_deref(), Some("cached.txt"));
+
+    // Tamper the file's signed payload on disk, behind the engine's back:
+    // the next listing must re-read it rather than serve the cached ok.
+    let path = format!("{}/{}", storage.root(), object.id.0);
+    let mut bytes = tokio::fs::read(&path).await.unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xff;
+    tokio::fs::write(&path, &bytes).await.unwrap();
+
+    let tampered = storage.list_objects().await.unwrap();
+    assert_eq!(tampered.len(), 1);
+    assert!(
+        !tampered[0].verified,
+        "a tampered file must be re-read and flagged unverified, not served from cache"
+    );
+
+    // Deleting the file must drop it (and its cache entry) from the listing.
+    tokio::fs::remove_file(&path).await.unwrap();
+    let empty = storage.list_objects().await.unwrap();
+    assert!(
+        empty.is_empty(),
+        "deleted objects must disappear from listings"
+    );
 }

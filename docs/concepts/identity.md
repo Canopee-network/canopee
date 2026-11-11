@@ -33,11 +33,14 @@ knows your `IdentityId` — no trusted server required. `Object::verify()` and
 
 Why a separate device key? Because the network peer id is a *transport
 identity* — it can change, be rotated, or be ephemeral. Your person identity
-must be stable, but your machine identity must be freely replaceable without
-invalidating your objects, records, or signatures. If a device is lost or
-compromised you rotate only the *device* key (remove the device from
-`(owner, "devices")`), and your identity — and every object signed by it —
-remains untouched.
+must be stable, but your machine identity should be replaceable without
+invalidating your objects, records, or signatures.
+
+Important limitation: pairing still copies the **account identity key** to
+each device. Removing a device from `(owner, "devices")` stops peers dialing it
+but does not revoke its copy of the account key. Independent device
+revocation requires the delegated-key migration in
+[Canopee Sync v1](../reference/sync-v1.md#identity-device-and-key-model).
 
 ## Mapping between the two
 
@@ -70,17 +73,20 @@ See [Usernames guide](../guides/usernames.md) for the walk-through.
 Pairing lets a new device become a recognized member of an existing identity
 _owner-controlled_ and _verified_:
 
-- `canopee pair` on the device you trust starts a short-lived session; it
-  proves ownership by having **both** the account key and a session code.
-- The pairing payload is encrypted with a session key derived (ECDH/X25519)
-  between the two parties, so the secret never transits in plaintext.
-- `canopee pair <session-code>` on the new device completes it, and afterwards
-  the new device holds a copy of the identity key and joins the device list.
+- `canopee pair` on the **new** device starts a single-use session and prints a
+  12-character code plus a QR payload.
+- On the existing device, `canopee pair <qr> --code <code>` is the explicit
+  approval. The code never travels over the wire.
+- The payload is encrypted with a key derived from the code, the one-time
+  session id, and both device ids (Argon2id → XChaCha20-Poly1305), so a wrong
+  code fails authentication.
+- After approval the new device holds a copy of the account identity key and
+  joins the device list.
 
 The pairing wire protocol lives in `canopee-network` (`PairingRequest` /
 `PairingResponse` in `behaviour.rs`); the runtime side is in
-`crates/canopee-runtime/src/pairing.rs` ([initiate_pairing],
-[complete_pairing], [accept_pairing], [send_pairing_request]).
+`crates/canopee-runtime/src/pairing.rs` (`initiate_pairing`,
+`complete_pairing`, `accept_pairing`, `send_pairing_request`).
 
 See [Multi-device identity guide](../guides/multi-device-identity.md).
 
@@ -97,16 +103,37 @@ Two person-level records round out the identity model:
 Both are re-shared whenever the node starts (see
 [Sharing](sharing.md)).
 
-## Device sync
+## Record sync
 
-Because each device carries its own key, data written on one device needs to
-reach the others. `canopee sync` (periodically, and on demand via
-`sync_with_peer` / `sync_with_all_devices`):
+Because each device also has its own device key, user records written on one
+device need to reach the others. `canopee sync records` (periodically, and on
+demand via `sync_with_peer` / `sync_with_all_devices`):
 
 1. resolves the owner's device list,
-2. fetches the owner's public records (profile, devices, home) from each
-   device,
+2. fetches the owner's user records (profile, contacts, devices, home) from
+   each device,
 3. fills missing object copies locally.
 
-This is how an object put on your phone can be read on your laptop — both are
-members of the same identity, so both can serve the owner's public objects.
+Record refresh is last-writer-wins. It does not turn arbitrary stored objects
+into shared ones; normal sharing/serving rules still apply.
+
+## Folder sync
+
+Folder sync is a separate path for keeping a **local directory** in step
+across your devices:
+
+```bash
+canopee sync create ~/Documents --name docs   # one device
+canopee sync join docs ~/Documents            # another device
+canopee sync now docs
+```
+
+The account's `name -> root` index is encrypted at `(owner, "sync")`; manifests
+and file blobs are encrypted objects. A recursive watcher triggers a pass about
+500 ms after local changes while the node is started and connected, a 30-second
+periodic pass is the fallback, and `sync now` forces a pass.
+
+Record sync is last-writer-wins; folder sync preserves both sides of a
+same-path edit as an original plus a `.conflict-<UTC-millis>` copy. Deletes use
+tombstones. See [Canopee Sync v1](../reference/sync-v1.md) for the exact
+semantics, known gaps, and production requirements.

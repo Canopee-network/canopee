@@ -967,7 +967,7 @@ mod tests {
     async fn keep_alive_serves_multiple_requests_on_one_connection() {
         let addr = spawn_server(sample_files()).await;
 
-        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let stream = TcpStream::connect(addr).await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = tokio::io::BufReader::new(read_half);
 
@@ -1120,7 +1120,7 @@ mod tests {
                 break;
             }
         }
-        let (status, mut headers, _) = parse_response(head.as_bytes());
+        let (status, headers, _) = parse_response(head.as_bytes());
         let mut body = Vec::new();
         if status.contains(" 200 ") || status.contains(" 206 ") || status.contains(" 416 ") {
             let len = headers

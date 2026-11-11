@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if)]
+
 use clap::{Parser, Subcommand};
 mod app;
 mod commands;
@@ -279,10 +281,39 @@ enum Commands {
         #[arg(long)]
         code: Option<String>,
     },
-    /// Refreshes this node's user records (profile, contacts, devices) from
-    /// the network. With no argument, syncs from every registered device;
-    /// with a peer id, syncs from that specific peer.
+    /// Encrypted folder sync across your own devices, and the legacy record
+    /// refresh under `sync records`.
     Sync {
+        #[command(subcommand)]
+        command: SyncCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SyncCommand {
+    /// Creates a new account sync root at `<path>` and starts syncing it.
+    Create {
+        path: String,
+        /// The account-wide root name. Defaults to the folder's name.
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Maps an existing account sync root to a local folder. Existing files in
+    /// the destination are kept and synced like any other local content.
+    Join { name: String, path: String },
+    /// Lists sync roots known to this device.
+    List,
+    /// Shows one root's status, or every root when `<name>` is omitted.
+    Status { name: Option<String> },
+    /// Runs one pull/push pass for `<name>`, or every local root when omitted.
+    Now { name: Option<String> },
+    /// Removes this device's local mapping. The folder and remote data are
+    /// untouched.
+    #[command(alias = "rm")]
+    Remove { name: String },
+    /// Refreshes profile/contacts/devices from the network. With no peer id,
+    /// syncs from every registered device.
+    Records {
         /// The peer id to sync from. Omit to sync from all devices.
         peer_id: Option<String>,
     },
@@ -424,6 +455,14 @@ async fn main() {
             overwrite,
         } => commands::identity::import_identity(path, passphrase, overwrite).await,
         Commands::Pair { qr, code } => commands::pairing::pair(qr, code).await,
-        Commands::Sync { peer_id } => commands::sharing::sync(peer_id).await,
+        Commands::Sync { command } => match command {
+            SyncCommand::Create { path, name } => commands::sync::create(path, name).await,
+            SyncCommand::Join { name, path } => commands::sync::join(name, path).await,
+            SyncCommand::List => commands::sync::list().await,
+            SyncCommand::Status { name } => commands::sync::status(name).await,
+            SyncCommand::Now { name } => commands::sync::now(name).await,
+            SyncCommand::Remove { name } => commands::sync::remove(name).await,
+            SyncCommand::Records { peer_id } => commands::sharing::sync_records(peer_id).await,
+        },
     }
 }

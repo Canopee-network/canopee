@@ -1,16 +1,52 @@
 use crate::object_id::ObjectId;
 use crate::{Object, ObjectInfo, Verify};
 use anyhow::Result;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, MutexGuard};
+use std::time::SystemTime;
 use tokio::fs;
+
+/// Cheap on-disk stamp for an object file: anything that changes the parsed
+/// object (its bytes, and therefore its size or content) also changes one of
+/// these. A listing re-reads and re-verifies an object only when its stamp
+/// differs from the cached one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+impl FileStamp {
+    fn of(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+        }
+    }
+}
+
+struct CachedInfo {
+    stamp: FileStamp,
+    info: ObjectInfo,
+}
 
 pub struct Storage {
     root: String,
+    /// `list_objects` results, valid while the file's stamp is unchanged.
+    /// Signature verification is the expensive part of a listing — a full
+    /// read plus crypto per object, repeated every refresh tick by the tray —
+    /// so it is only redone when the file actually changes. The friendly-name
+    /// sidecar is deliberately *not* cached here (it is read fresh per
+    /// listing): it lives outside the signed object and may be rewritten at
+    /// any time by another app sharing the store.
+    listing: Mutex<HashMap<ObjectId, CachedInfo>>,
 }
 
 impl Storage {
     pub fn new(root: &str) -> Self {
         Self {
             root: root.to_string(),
+            listing: Mutex::new(HashMap::new()),
         }
     }
 
@@ -78,32 +114,65 @@ impl Storage {
     pub async fn list_objects(&self) -> Result<Vec<ObjectInfo>> {
         let mut objects = Vec::new();
         let mut entries = fs::read_dir(&self.root).await?;
+        let mut seen: HashSet<ObjectId> = HashSet::new();
         while let Some(entry) = entries.next_entry().await? {
             let filename = entry.file_name().to_string_lossy().to_string();
             if filename.starts_with('.') {
                 continue;
             }
-            let bytes = fs::read(entry.path()).await?;
-            // A file that fails to decode is treated as absent rather than
-            // failing the whole listing — protects concurrent writers in a
-            // shared user store from transiently breaking every other app's
-            // "my data" view.
-            let Ok(object) = bincode::deserialize::<Object>(&bytes) else {
-                continue;
+            let id = ObjectId::new(&filename);
+            let metadata = entry.metadata().await?;
+            let stamp = FileStamp::of(&metadata);
+            let cached = {
+                let listing = self.lock_listing();
+                listing
+                    .get(&id)
+                    .filter(|cached| cached.stamp == stamp)
+                    .map(|cached| cached.info.clone())
             };
-            let verified = object.verify();
-            let id = object.id.clone();
-            let object_info = ObjectInfo {
-                id: id.clone(),
-                owner: object.payload.owner,
-                size: object.payload.metadata.size,
-                verified,
-                name: self.read_name(&id).await,
-                object_type: object.payload.object_type,
+            let mut info = match cached {
+                Some(info) => info,
+                None => {
+                    let bytes = fs::read(entry.path()).await?;
+                    // A file that fails to decode is treated as absent rather
+                    // than failing the whole listing — protects concurrent
+                    // writers in a shared user store from transiently breaking
+                    // every other app's "my data" view.
+                    let Ok(object) = bincode::deserialize::<Object>(&bytes) else {
+                        continue;
+                    };
+                    let verified = object.verify();
+                    let info = ObjectInfo {
+                        id: object.id.clone(),
+                        owner: object.payload.owner,
+                        size: object.payload.metadata.size,
+                        verified,
+                        name: None,
+                        object_type: object.payload.object_type,
+                    };
+                    let mut listing = self.lock_listing();
+                    listing.insert(
+                        id.clone(),
+                        CachedInfo {
+                            stamp,
+                            info: info.clone(),
+                        },
+                    );
+                    info
+                }
             };
-            objects.push(object_info);
+            info.name = self.read_name(&info.id).await;
+            seen.insert(id);
+            objects.push(info);
         }
+        // Forget entries whose files are gone (evicted here or deleted by
+        // another app sharing the store), so the cache stays bounded.
+        self.lock_listing().retain(|id, _| seen.contains(id));
         Ok(objects)
+    }
+
+    fn lock_listing(&self) -> MutexGuard<'_, HashMap<ObjectId, CachedInfo>> {
+        self.listing.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     pub async fn import(&self, object: &Object) -> Result<()> {

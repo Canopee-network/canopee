@@ -17,6 +17,10 @@ use time::OffsetDateTime;
 /// record can't be replayed with a different timestamp) but nothing
 /// currently compares it against a previously-seen value — callers don't
 /// yet reject an old pointer served back in place of a newer one.
+///
+/// It is measured in **milliseconds** since the Unix epoch (not seconds):
+/// sync can publish several revisions within one wall-clock second, and
+/// coarse timestamps made last-writer-wins refresh skip the newer revision.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppPointerRecord {
     pub name: String,
@@ -30,7 +34,7 @@ pub struct AppPointerRecord {
 impl AppPointerRecord {
     pub fn sign(identity: &Identity, name: &str, manifest: ObjectId) -> anyhow::Result<Self> {
         let owner = identity.id().clone();
-        let published_at = OffsetDateTime::now_utc().unix_timestamp() as u64;
+        let published_at = (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as u64;
         let signature =
             identity.sign(&Self::signing_bytes(name, &owner, &manifest, published_at))?;
 

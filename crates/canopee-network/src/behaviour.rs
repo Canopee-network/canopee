@@ -4,7 +4,7 @@ use crate::message::{
 };
 use libp2p::{
     autonat, dcutr, gossipsub, identify, kad, mdns, ping, relay, request_response,
-    swarm::behaviour::toggle::Toggle, swarm::NetworkBehaviour,
+    swarm::NetworkBehaviour, swarm::behaviour::toggle::Toggle,
 };
 
 pub const IDENTIFY_PROTOCOL: &str = "/canopee/id/1.0.0";

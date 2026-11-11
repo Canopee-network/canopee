@@ -1,4 +1,4 @@
-use canopee_network::{Multiaddr, NetworkManager, ObjectProvider, ObjectStore};
+use canopee_network::{Multiaddr, NetworkManager, NetworkOptions, ObjectProvider, ObjectStore};
 use canopee_storage::{Export, ExportBundle, Object, ObjectId, ObjectType, Storage, Verify};
 use libp2p::identity::Keypair;
 use std::collections::HashMap;
@@ -30,7 +30,9 @@ async fn make_manager(
     store: Arc<dyn ObjectStore>,
 ) -> (NetworkManager, Multiaddr) {
     let listen: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse().unwrap();
-    let manager = NetworkManager::new(keypair, listen, provider, store, true).unwrap();
+    let manager =
+        NetworkManager::with_options(keypair, listen, provider, store, NetworkOptions::isolated())
+            .unwrap();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let bound = loop {
         let addrs = manager.listen_addresses().await.unwrap();
@@ -95,11 +97,11 @@ async fn two_nodes_dial_and_discover_via_kad() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let mut saw_peer_b = false;
     while tokio::time::Instant::now() < deadline {
-        if let Ok(peers) = manager_a.peers().await {
-            if peers.iter().any(|p| p.peer_id == peer_b_id) {
-                saw_peer_b = true;
-                break;
-            }
+        if let Ok(peers) = manager_a.peers().await
+            && peers.iter().any(|p| p.peer_id == peer_b_id)
+        {
+            saw_peer_b = true;
+            break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -140,11 +142,11 @@ async fn node_fetches_object_announced_by_peer() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let mut providers: Vec<libp2p::PeerId> = Vec::new();
     while tokio::time::Instant::now() < deadline {
-        if let Ok(p) = manager_a.find_providers(object_id.clone()).await {
-            if !p.is_empty() {
-                providers = p;
-                break;
-            }
+        if let Ok(p) = manager_a.find_providers(object_id.clone()).await
+            && !p.is_empty()
+        {
+            providers = p;
+            break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -223,7 +225,7 @@ async fn pushed_object_is_stored_by_connected_peer() {
 
     let (manager_a, _addr_a) =
         make_manager(device_keypair(), Arc::new(NoObjects), Arc::new(RejectStore)).await;
-    let (manager_b, addr_b) =
+    let (_manager_b, addr_b) =
         make_manager(device_keypair(), Arc::new(NoObjects), store_b.clone()).await;
 
     manager_a.dial(addr_b.clone()).await.unwrap();

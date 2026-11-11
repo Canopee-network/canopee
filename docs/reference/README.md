@@ -18,4 +18,6 @@ model fundamentals*, start at [Concepts](../concepts/README.md).
   and operating a public relay/bootstrap node.
 - [Roadmap](roadmap.md) — published plans: hosting replacement, HTTPS/TLS,
   app ideas.
+- [Canopee Sync v1](sync-v1.md) — private folder-sync contract, current
+  implementation status, known deviations, and production gate.
 - [Comparison](comparison.md) — Canopee vs. IPFS, Iroh, Nostr, and friends.

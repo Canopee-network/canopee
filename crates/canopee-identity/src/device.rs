@@ -133,7 +133,10 @@ async fn device_key_survives_concurrent_first_run() {
     for _ in 0..8 {
         let path = path.to_string();
         handles.push(tokio::spawn(async move {
-            DeviceKey::load_or_create(&path, "laptop").await.unwrap().peer_id()
+            DeviceKey::load_or_create(&path, "laptop")
+                .await
+                .unwrap()
+                .peer_id()
         }));
     }
     let mut ids: Vec<_> = Vec::new();
@@ -154,5 +157,9 @@ async fn distinct_paths_mint_distinct_device_keys() {
     let a = DeviceKey::load_or_create(path_a, "a").await.unwrap();
     let b = DeviceKey::load_or_create(path_b, "b").await.unwrap();
 
-    assert_ne!(a.peer_id(), b.peer_id(), "two devices must not share a PeerId");
+    assert_ne!(
+        a.peer_id(),
+        b.peer_id(),
+        "two devices must not share a PeerId"
+    );
 }

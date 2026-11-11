@@ -1,3 +1,5 @@
+#![allow(clippy::await_holding_lock)]
+
 use canopee_node::Node;
 use canopee_sdk::{
     CanopeeClient, Contact, ContactList, HomeEntry, HomeIndex, IdentityId, ObjectType, Permission,

@@ -1,6 +1,6 @@
 use super::{
-    relay_peer_id_from_circuit_addr, Command, InboundPairing, InboundServe,
-    InboundServeRegistration, ObjectProvider, ObjectStore,
+    Command, InboundPairing, InboundServe, InboundServeRegistration, ObjectProvider, ObjectStore,
+    relay_peer_id_from_circuit_addr,
 };
 use crate::behaviour::{CanopeeBehaviour, CanopeeBehaviourEvent};
 use crate::message::{
@@ -9,11 +9,11 @@ use crate::message::{
 };
 use crate::peer::{Peer, RelayReservation};
 use canopee_storage::ExportBundle;
-use futures::{future::BoxFuture, stream::FuturesUnordered, StreamExt};
+use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use libp2p::kad;
 use libp2p::request_response;
-use libp2p::swarm::SwarmEvent;
-use libp2p::{autonat, gossipsub, identify, mdns, relay, Multiaddr, PeerId};
+use libp2p::swarm::{SwarmEvent, dial_opts::DialOpts};
+use libp2p::{Multiaddr, PeerId, autonat, gossipsub, identify, mdns, relay};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -40,6 +40,7 @@ type ServeRegistryReplyFuture = BoxFuture<
     ),
 >;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_event_loop(
     mut swarm: libp2p::Swarm<CanopeeBehaviour>,
     mut commands: mpsc::Receiver<Command>,
@@ -180,6 +181,7 @@ pub(super) async fn run_event_loop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_command(
     swarm: &mut libp2p::Swarm<CanopeeBehaviour>,
     command: Command,
@@ -210,17 +212,21 @@ pub(super) fn handle_command(
         oneshot::Sender<anyhow::Result<ServeResponse>>,
     >,
     peers: &mut HashMap<PeerId, Peer>,
-    listen_addrs: &Vec<Multiaddr>,
+    listen_addrs: &[Multiaddr],
     relay_reservations: &HashMap<PeerId, RelayReservation>,
 ) {
     match command {
         Command::Dial(addr) => {
-            if let Err(e) = swarm.dial(addr.clone()) {
+            let opts = DialOpts::unknown_peer_id()
+                .address(addr.clone())
+                .allocate_new_port()
+                .build();
+            if let Err(e) = swarm.dial(opts) {
                 tracing::warn!("Failed to dial {addr}: {e}");
             }
         }
         Command::ListListenAddresses(reply) => {
-            let _ = reply.send(listen_addrs.clone());
+            let _ = reply.send(listen_addrs.to_vec());
         }
         Command::ListenViaRelay(relay_addr) => {
             let circuit_addr = relay_addr.with(libp2p::multiaddr::Protocol::P2pCircuit);
@@ -428,6 +434,7 @@ pub(super) fn handle_command(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_swarm_event(
     event: SwarmEvent<CanopeeBehaviourEvent>,
     swarm: &mut libp2p::Swarm<CanopeeBehaviour>,

@@ -35,6 +35,7 @@ impl Runtime {
             None => return Ok(None),
         };
         let object = self.storage.get_verified(&record.manifest).await?;
+        let object = self.open_object(&object)?;
         Ok(Some(object.decode()?))
     }
 
@@ -48,9 +49,15 @@ impl Runtime {
         let version = previous.as_ref().map(|i| i.version + 1).unwrap_or(1);
         let mut index = index.clone();
         index.version = version;
-        let object = index.to_object(&self.identity)?;
+        let object = self
+            .put_object_for(
+                bincode::serialize(&index)?,
+                canopee_storage::ObjectType::HomeIndex,
+                None,
+                &[],
+            )
+            .await?;
         let id = object.id.clone();
-        self.storage.put_verified(&object).await?;
         self.publish_pointer(RECORD_HOME, id.clone()).await?;
         self.reconcile_shared(previous.as_ref(), Some(&index)).await;
         Ok(id)

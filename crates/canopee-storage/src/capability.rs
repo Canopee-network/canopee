@@ -75,16 +75,18 @@ impl Resource {
     }
 
     pub fn parse(s: &str) -> anyhow::Result<Self> {
-        let (kind, rest) = s
-            .split_once(':')
-            .ok_or_else(|| anyhow::anyhow!("resource must be object:<id> | channel:<topic> | shared:<owner>:<name>"))?;
+        let (kind, rest) = s.split_once(':').ok_or_else(|| {
+            anyhow::anyhow!(
+                "resource must be object:<id> | channel:<topic> | shared:<owner>:<name>"
+            )
+        })?;
         match kind {
             "object" => Ok(Resource::Object(ObjectId::new(rest))),
             "channel" => Ok(Resource::Channel(rest.to_string())),
             "shared" => {
-                let (owner, name) = rest
-                    .split_once(':')
-                    .ok_or_else(|| anyhow::anyhow!("shared resource must be shared:<owner>:<name>"))?;
+                let (owner, name) = rest.split_once(':').ok_or_else(|| {
+                    anyhow::anyhow!("shared resource must be shared:<owner>:<name>")
+                })?;
                 Ok(Resource::SharedName {
                     owner: IdentityId::new(owner),
                     name: name.to_string(),
@@ -137,13 +139,7 @@ impl Capability {
         expires_at: Option<u64>,
     ) -> anyhow::Result<Self> {
         let issued_at = now_ts();
-        let fields = Self::signing_fields(
-            &subject,
-            &resource,
-            &permissions,
-            issued_at,
-            expires_at,
-        );
+        let fields = Self::signing_fields(&subject, &resource, &permissions, issued_at, expires_at);
         let id = digest_hex(fields.as_bytes());
         let signing_bytes = Self::signing_bytes(&id, &fields);
         let signature = issuer.sign(&signing_bytes)?;
@@ -225,15 +221,20 @@ impl Capability {
     /// hasn't expired. Revocation is tracked separately in the issuer's
     /// `CapabilityIndex`.
     pub fn is_active_at(&self, now: u64) -> bool {
-        now >= self.issued_at
-            && self.expires_at.map(|t| now <= t).unwrap_or(true)
+        now >= self.issued_at && self.expires_at.map(|t| now <= t).unwrap_or(true)
     }
 
     /// True when this capability grants `permission` on `resource` to
     /// `subject`, is currently valid (signature + id + issuer), and active at
     /// `now`. This is the one-call "should I let this peer through?" check an
     /// app runs before serving a resource.
-    pub fn permits(&self, subject: &IdentityId, permission: Permission, resource: &Resource, now: u64) -> bool {
+    pub fn permits(
+        &self,
+        subject: &IdentityId,
+        permission: Permission,
+        resource: &Resource,
+        now: u64,
+    ) -> bool {
         subject == &self.subject
             && &self.resource == resource
             && self.permissions.contains(&permission)
@@ -319,9 +320,7 @@ impl CapabilityIndex {
     ) -> Option<&Capability> {
         self.entries.iter().find_map(|entry| {
             let cap = &entry.capability;
-            (!entry.revoked
-                && cap.permits(subject, permission, resource, now))
-            .then_some(cap)
+            (!entry.revoked && cap.permits(subject, permission, resource, now)).then_some(cap)
         })
     }
 
@@ -335,7 +334,8 @@ impl CapabilityIndex {
         permission: Permission,
         now: u64,
     ) -> bool {
-        self.find_active(subject, resource, permission, now).is_some()
+        self.find_active(subject, resource, permission, now)
+            .is_some()
     }
 }
 
@@ -375,7 +375,9 @@ mod tests {
     mod defaults {
         use super::*;
         pub fn resource() -> Resource {
-            Resource::Object(ObjectId::new("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"))
+            Resource::Object(ObjectId::new(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            ))
         }
     }
 

@@ -19,6 +19,10 @@ per-user" split.
 │                           Local cache of resolved (owner, name) pointers,
 │                           so apps on one machine see each other's fresh
 │                           pointers without DHT round trips.
+├── sync/
+│   └── roots.bin           Device-local folder-sync mappings: sync-root name
+│                           → local path, last applied manifest/revision, and
+│                           last-sync timestamp. Shared by apps on this device.
 ├── aliases/
 │                           Friendly-name → owner map for canopee:// URIs.
 ├── state/
@@ -35,8 +39,10 @@ per-user" split.
 
 ## The split in practice
 
-- **User root** (`~/.canopee`): `identity/`, `storage/`, `records/`,
-  `aliases/` — shared by every app and device of the same person.
+- **User root** (`~/.canopee`): `identity/`, `storage/`, `records/`, `sync/`,
+  `aliases/` — shared by every app and device of the same person. `sync/` is
+  per-device state inside the shared user root: every app sees the same folder
+  mappings, while another device has its own.
 - **App root** (also `~/.canopee` for the CLI; overridden by
   `Config::with_app_root` for embedded apps): `state/`, `cache.cache`,
   `exports/`, `node.sock`, `uri-pending` — per-app/per-process runtime state.
@@ -53,5 +59,6 @@ moves only the app-root half, keeping the person's identity + data shared.
 | any `put/get/share` | objects under `storage/<id>`; home index is a signed object |
 | any `fetch` of a peer's object | object under `storage/` + an LRU cache entry |
 | `canopee alias set` | `aliases/` |
+| `canopee sync create/join` | `sync/roots.bin`; encrypted indexes/manifests/chunks under `storage/` |
 | `canopee start` | `node.sock` (removed on clean stop) |
 | `canopee gateway` | (no persistent files; loopback port + session token) |

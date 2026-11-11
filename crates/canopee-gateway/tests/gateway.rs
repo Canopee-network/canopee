@@ -1,3 +1,5 @@
+#![allow(clippy::await_holding_lock)]
+
 //! End-to-end test of the gateway: a real in-process [`Node`] behind a real
 //! [`Gateway`], driven over the wire by a hand-rolled WebSocket *client* (the
 //! same exchange a browser's `WebSocket` object performs).
@@ -7,16 +9,10 @@ use canopee_node::Node;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const OP_TEXT: u8 = 0x1;
 const OP_PING: u8 = 0x9;
 const OP_PONG: u8 = 0xa;
 const OP_CLOSE: u8 = 0x8;
-
-fn b64(bytes: &[u8]) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(bytes)
-}
 
 /// Performs an RFC 6455 client handshake against the gateway. Returns the
 /// stream on `101`, or `None` when the gateway refuses (403).
@@ -187,14 +183,14 @@ async fn browser_drives_node_through_gateway() {
         "bad token"
     );
     assert!(
-        handshake(addr, Some(&token.token_hex()), Some("https://evil.example"))
+        handshake(addr, Some(token.token_hex()), Some("https://evil.example"))
             .await
             .unwrap()
             .is_none(),
         "cross-origin handshake"
     );
     assert!(
-        handshake(addr, Some(&token.token_hex()), Some("http://127.0.0.1:1"))
+        handshake(addr, Some(token.token_hex()), Some("http://127.0.0.1:1"))
             .await
             .unwrap()
             .is_some(),
@@ -202,7 +198,7 @@ async fn browser_drives_node_through_gateway() {
     );
 
     // ---- established session: identity, storage, and pings ----
-    let mut ws = handshake(addr, Some(&token.token_hex()), None)
+    let mut ws = handshake(addr, Some(token.token_hex()), None)
         .await
         .unwrap()
         .expect("correct token handshake must succeed");
@@ -248,7 +244,7 @@ async fn browser_drives_node_through_gateway() {
     .await
     .unwrap();
     assert_eq!(event["op"], "error");
-    assert!(event["message"].as_str().unwrap().len() > 0);
+    assert!(!event["message"].as_str().unwrap().is_empty());
 
     // ---- streaming subscription path: the connection stays responsive
     // while a subscription pump is running ----

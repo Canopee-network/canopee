@@ -81,6 +81,51 @@ in the background; resolving checks the local cache first, then the DHT
 bounded at `RESOLVE_DHT_TIMEOUT` (10s) so an unreachable network never
 stalls a local lookup.
 
+### Folder sync
+
+`Runtime` implements the Canopee Sync engine in `src/folder_sync.rs`:
+
+```rust
+let root = runtime.sync_create_root("/Users/me/Documents", Some("docs")).await?;
+runtime.sync_join_root("docs", "/Users/me/other-machine/Documents").await?;
+let results = runtime.sync_now(Some("docs")).await?;
+let roots = runtime.sync_list_roots().await?;
+runtime.sync_remove_root("docs").await?;
+```
+
+The account index lives behind the encrypted `(owner, "sync")` pointer; each
+root's manifest, file indexes, and chunks are encrypted to the identity. Folder
+mappings and their last applied manifest/revision are device-local in
+`~/.canopee/sync/roots.bin` (user root, so all apps see them). Files use
+content-defined chunks (1 MiB target, 256 KiB minimum, 4 MiB maximum) behind a
+`SyncFile` index; older whole-file `Blob` entries remain readable.
+
+A pass rescans the local folder with streaming hashes, uploads changed chunks
+and file indexes, fetches missing remote objects, and writes a new encrypted
+manifest when anything changed. Peak per-file buffer memory is bounded by the
+maximum chunk size, and unchanged chunks are reused from the prior local
+manifest entry. Remote files are applied via temp file + `fsync` + atomic rename
+(+ best-effort parent directory `fsync` on Unix). A recursive filesystem
+watcher triggers a pass about 500 ms after local changes while started and
+connected; root watchers are reconciled every 5 seconds. A 30-second periodic
+pass remains the fallback, and `sync now` is the explicit trigger.
+
+Deletes are tombstones pruned after 30 days on the next manifest publish.
+Tombstones record the content hash they deleted so a stale delete cannot erase
+a newer local edit. A local edit wins over a remote delete, a remote edit wins
+over a local delete, and both-sides-edit preserves the local version as
+`<name>.conflict-<UTC-millis>`. Before applying and publishing, the pass
+re-resolves the sync record and retries up to 5 times on `SyncIndexChanged`;
+this narrows concurrent-publisher races but is not a cross-device lock or
+manifest-chain CAS. Restart re-marks locally owned sync objects and chunks as
+servable. Expired tombstones are metadata-only GC; chunks referenced by old
+manifests are not collected yet.
+
+Coverage is in `crates/canopee-runtime/src/folder_sync.rs` unit tests plus the
+`two_nodes_sync_folder` e2e test; see
+[Canopee Sync v1](../../docs/reference/sync-v1.md) for the contract and known
+deviations.
+
 ### Sharing gate ("nothing shared by default")
 
 `StorageObjectProvider` only serves an object to the network when it's
@@ -106,6 +151,21 @@ runtime.is_shared(&id).await;         // shared or cached?
 are announced, `false` entries are unannounced (both best-effort, in the
 background — the local shared set gates serving regardless of network
 health).
+
+### Encryption is the default
+
+`put`, `put_object`, and `put_file` seal the payload to the owner's identity
+before hashing and storing it (see `canopee-identity`'s envelope). Because the
+id covers ciphertext, a stored object cannot be read by a peer that merely
+holds the bytes. `share_object_for` decrypts the owner's copy and publishes a
+separate copy wrapped for `owner + recipients`; `share_object` (no recipients)
+serves the owner-encrypted copy unchanged to the owner's other devices.
+
+Public app artifacts use `put_object_public` and remain plaintext. Contacts and
+the home index are stored through the encrypted path; profiles, usernames,
+device lists, capability indexes, and pointer records remain plaintext because
+peers need them for discovery. Metadata (id, type, size, timestamp, owner) is
+not encrypted. See [Security](../../docs/concepts/security.md).
 
 ## Node state
 
@@ -163,7 +223,8 @@ persistence (e.g. remembering known peers across restarts).
 roots, shared user root convergence), user-record CRUD with version bumping,
 the **sharing gate** (owned-unshared refused, shared served, cached always
 served), home-index reconcile on save/load, share persistence across
-reopen, and a two-node network test proving private objects are refused
-over the wire while announced ones are fetched via DHT and re-served as
-cache. The `ObjectProvider` behavior is exercised in-process through
-`provider_for` helpers rather than needing a live swarm.
+reopen, folder-sync manifest validation/merge rules, and a two-node network
+test proving private objects are refused over the wire while announced ones are
+fetched via DHT and re-served as cache. The `ObjectProvider` behavior is
+exercised in-process through `provider_for` helpers rather than needing a live
+swarm; full folder-sync behavior is covered by the e2e suite.

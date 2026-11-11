@@ -1,5 +1,5 @@
-use crate::object_id::ObjectId;
 use crate::Object;
+use crate::object_id::ObjectId;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -187,13 +187,14 @@ impl Cache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::object_id::ObjectId;
     use crate::ObjectType;
+    use crate::object_id::ObjectId;
     use canopee_identity::Identity;
     use std::sync::Arc;
 
     fn scratch_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("canopee_cache_test_{tag}_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("canopee_cache_test_{tag}_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -242,7 +243,9 @@ mod tests {
     async fn lru_orders_least_recently_served_first_and_skips_missing() {
         let dir = scratch_dir("lru");
         let storage = crate::Storage::new(dir.join("storage").to_str().unwrap());
-        tokio::fs::create_dir_all(dir.join("storage")).await.unwrap();
+        tokio::fs::create_dir_all(dir.join("storage"))
+            .await
+            .unwrap();
 
         let owner = Arc::new(
             Identity::create(dir.join("owner.key").to_str().unwrap())
@@ -272,7 +275,10 @@ mod tests {
         // Total bytes counts every tracked object that still exists on disk,
         // including ones never on disk.
         let total = index.total_cached_bytes(&storage).await;
-        assert_eq!(total, old.payload.metadata.size + fresh.payload.metadata.size);
+        assert_eq!(
+            total,
+            old.payload.metadata.size + fresh.payload.metadata.size
+        );
         lru.clear();
     }
 
@@ -304,7 +310,11 @@ mod tests {
                 .unwrap(),
         );
 
-        let cache = Cache::new(dir.join("cache.cache"), own_identity.id().clone(), CacheIndex::new());
+        let cache = Cache::new(
+            dir.join("cache.cache"),
+            own_identity.id().clone(),
+            CacheIndex::new(),
+        );
         let mine = Object::new(&own_identity, b"mine".to_vec(), ObjectType::Blob);
         let theirs = Object::new(&other_identity, b"theirs".to_vec(), ObjectType::Blob);
 

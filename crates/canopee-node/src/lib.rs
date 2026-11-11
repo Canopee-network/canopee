@@ -354,10 +354,13 @@ impl Node {
             },
 
             NodeCommand::Peers => {
-                // Best-effort enrichment: resolve connected peers' usernames
-                // and display names before answering, so the CLI/UI can show
-                // friendly names. Bounded internally (see `enrich_peers`).
-                let _ = self.runtime.enrich_peers().await;
+                // Friendly names are resolved in the background, never here:
+                // `enrich_peers` does per-peer identity/username/profile DHT
+                // lookups (5 s caps each), and awaiting it inline stalled this
+                // command — and the tray's refresh loop — for seconds just to
+                // report a peer count. This triggers a throttled background
+                // pass and answers with the meta already known.
+                self.runtime.request_peer_enrichment();
                 match self.runtime.network.peers().await {
                     Ok(peers) => NodeResponse::Peers {
                         peers: peers
@@ -827,6 +830,54 @@ impl Node {
                 self.runtime.stop_serve_session().await;
                 NodeResponse::ServeSessionStopped
             }
+
+            NodeCommand::SyncCreate { path, name } => {
+                match self.runtime.sync_create_root(&path, name.as_deref()).await {
+                    Ok(info) => NodeResponse::SyncRootCreated { info },
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+
+            NodeCommand::SyncJoin { name, path } => {
+                match self.runtime.sync_join_root(&name, &path).await {
+                    Ok(info) => NodeResponse::SyncRootJoined { info },
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+
+            NodeCommand::SyncList => match self.runtime.sync_list_roots().await {
+                Ok(roots) => NodeResponse::SyncRoots { roots },
+                Err(e) => NodeResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+
+            NodeCommand::SyncStatus { name } => {
+                match self.runtime.sync_status(name.as_deref()).await {
+                    Ok(roots) => NodeResponse::SyncRoots { roots },
+                    Err(e) => NodeResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+
+            NodeCommand::SyncNow { name } => match self.runtime.sync_now(name.as_deref()).await {
+                Ok(results) => NodeResponse::SyncCompleted { results },
+                Err(e) => NodeResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+
+            NodeCommand::SyncRemove { name } => match self.runtime.sync_remove_root(&name).await {
+                Ok(()) => NodeResponse::SyncRootRemoved,
+                Err(e) => NodeResponse::Error {
+                    message: e.to_string(),
+                },
+            },
         }
     }
 }
@@ -847,6 +898,8 @@ async fn test_node_put() {
 
 #[cfg(test)]
 mod eviction_tests {
+    #![allow(clippy::await_holding_lock)]
+
     use super::*;
     use canopee_identity::Identity;
     use canopee_storage::{Export, Object, ObjectId, ObjectType};

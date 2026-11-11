@@ -33,13 +33,18 @@ conceptual vocabulary (content-addressing, DHT, relays) see
    relay/bootstrap infrastructure tier. Any publicly reachable node can
    relay for a NAT'd one with no opt-in step (see
    [Networking concept](../concepts/networking.md)).
+4. **Recipient-scoped encryption is the default for stored content.** Blob
+   payloads are XChaCha20-Poly1305 envelopes wrapped to the owner and any
+   explicit recipients, so relays and caches hold ciphertext. Public app
+   artifacts and discovery records are explicit exceptions; metadata remains
+   visible. See [Security concept](../concepts/security.md).
 
 ## Where Canopee is honestly behind
 
-- **No E2E encryption of content by default.** Objects are signed, not
-  encrypted (the transport is Noise-encrypted hop-by-hop; key-at-rest is
-  opt-in via `CANOPEE_IDENTITY_PASS`). See
-  [Security concept](../concepts/security.md).
+- **No independent cryptographic audit and weak metadata privacy.** Payloads
+  are encrypted by default, but ids, sizes, timestamps, owner ids, and public
+  records are visible. Key-at-rest protection is opt-in via
+  `CANOPEE_IDENTITY_PASS`. See [Security concept](../concepts/security.md).
 - **A minimal, hardcoded bootstrap list** (single entry). IPFS ships a
   richer community-maintained default. A DNS-based discovery design exists
   in the archive, unbuilt.

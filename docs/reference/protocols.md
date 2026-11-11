@@ -28,7 +28,8 @@ pushing `PubSubMessage` frames.
 | Usernames | `ClaimUsername`, `ResolveUsername`, `ShowUsername` |
 | Identity | `ExportIdentity`, `ImportIdentity`, `Device`, `DeviceList`, `ResolveOwnerDevice`, `AddDevice`, `RemoveDevice` |
 | Pairing | `InitiatePairing`, `CompletePairing` |
-| Sync | `SyncFromPeer`, `SyncDeviceList` |
+| Record sync | `SyncFromPeer`, `SyncDeviceList` |
+| Folder sync | `SyncCreate`, `SyncJoin`, `SyncList`, `SyncStatus`, `SyncNow`, `SyncRemove` |
 | Capabilities | `GrantCapability`, `ListCapabilities`, `RevokeCapability`, `CheckCapability`, `CheckAccess` |
 
 Key semantics:
@@ -44,12 +45,16 @@ Key semantics:
 - `ImportIdentity { overwrite }` only takes effect after the node restarts.
 - `CheckCapability`/`CheckAccess` are the enforcement path used before
   serving a resource (see [Capabilities](../concepts/capabilities.md)).
+- `SyncFromPeer`/`SyncDeviceList` refresh the owner's user records.
+  `SyncNow` runs a folder-sync pass over one root or every local root.
+- Folder-sync responses are `SyncRootCreated`, `SyncRootJoined`, `SyncRoots`,
+  `SyncCompleted`, and `SyncRootRemoved`.
 
 ### Message structs
 
 - `PubSubMessage`, `PeerInfo`, `RelayReservationInfo`, `DeviceInfo`,
   `PairingQrData`, `PairingRecord`, `PairingData`, `PairingPayload`,
-  `SyncResult`.
+  `SyncResult`, `SyncRootInfo`, `SyncRunResult`.
 
 ## 2. Node ⇄ node (libp2p in `canopee-network`)
 
@@ -82,6 +87,7 @@ See [Objects & pointers](../concepts/objects.md) for the full record table:
 | `username:<name>` | canonical owner identity | the claiming identity |
 | `device:<peer-id>` | canonical owner identity | the device identity |
 | `(owner, name)` pointers (via `PublishPointer`/`ResolvePointer`) | `PointerRecord { owner, name, object_id, timestamp, signature }` | the owner |
+| `(owner, "sync")` | encrypted folder-sync root index: `name -> root_id + current manifest/revision` | the owner's devices |
 
 All can be verified against signatures independent of the swarm.
 

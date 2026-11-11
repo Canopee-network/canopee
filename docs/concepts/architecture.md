@@ -43,7 +43,7 @@ them.
 | `canopee-storage` | Content-addressed, signed `Object` store on disk; user records; capabilities; DHT record model |
 | `canopee-network` | libp2p swarm: discovery (mDNS, Kademlia), DHT provider/record store, object exchange, pairing protocol, gossipsub pub/sub, relay + DCUtR, autonat |
 | `canopee-config` | `Config`: the `~/.canopee` layout (identity, storage, records, cache, exports, socket) + env-var overrides |
-| `canopee-runtime` | `Runtime`: ties identity + storage + network into one node runtime; implements every high-level operation (records, sharing, sync, pairing, capabilities) |
+| `canopee-runtime` | `Runtime`: ties identity + storage + network into one node runtime; implements every high-level operation (records, sharing, folder sync, pairing, capabilities) |
 | `canopee-protocol` | The wire types (`NodeCommand` / `NodeResponse`, `PairingData`, `SyncResult`, …) shared between the node and its clients |
 | `canopee-node` | The daemon: serves `canopee-protocol` over a Unix socket; also embeds a `Runtime` |
 | `canopee-sdk` | `CanopeeClient`: the client library apps use — connect, identity, put/get, peers, publish/subscribe, capabilities |
@@ -94,13 +94,16 @@ orchestration:
 4. Build the `NetworkManager` swarm (mDNS toggle from config).
 5. **Reseed network serving**: re-share `shared: true` home-index entries.
 6. Re-announce the public user records (profile, username, devices).
-7. Register this device in `(owner, "devices")` + the device registry.
-8. Spawn the LAN pairing handler and the periodic record-sync task.
+7. Re-mark locally owned sync manifests/file blobs as servable.
+8. Register this device in `(owner, "devices")` + the device registry.
+9. Spawn the LAN pairing handler, the periodic record- and folder-sync tasks,
+   and the recursive folder watcher.
 
 The runtime's internals are split across domain modules —
 `records.rs` (pointers, profile, devices, contacts), `sharing.rs` (home index,
-announce/fetch), `capabilities.rs`, `pairing.rs`, `sync.rs` — each an `impl
-Runtime` block over the single `struct Runtime`.
+announce/fetch), `capabilities.rs`, `pairing.rs`, `sync.rs` (user-record
+refresh), `folder_sync.rs` (Canopee Sync) — each an `impl Runtime` block over
+the single `struct Runtime`.
 
 ## The data path for one `put`
 

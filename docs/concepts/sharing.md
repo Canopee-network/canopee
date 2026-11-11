@@ -30,6 +30,27 @@ share_object(name, object_or_source):
 From the SDK: `share_object(id, name)` + `set_home_entry_shared(name, true)`.
 From the CLI: `canopee share <name> [object]`.
 
+## Sharing encrypted content
+
+Stored blobs are encrypted to the owner's devices by default. Sharing one with
+your own devices publishes the same ciphertext. Sharing with another person
+requires wrapping the content key for them:
+
+```
+canopee contact add <name> <peer-id> <dh-key>   # from their profile
+canopee share <name> --to <contact>
+```
+
+The runtime decrypts its own copy, re-encrypts it for `owner + recipients`, and
+publishes that separate copy. Because object ids cover ciphertext, the shared
+copy has a different id from your private original. Without `--to`, no
+additional recipient is added; sharing only affects where the object is served.
+
+Public app artifacts (`put_object_public`) are not encrypted and remain readable
+by anyone who fetches them. Metadata such as object id, owner, size, timestamp,
+and share name is visible even when the payload is encrypted. See
+[Security](security.md).
+
 ## Fetching
 
 Consumers fetch by either form:
@@ -52,8 +73,10 @@ being stored (`Storage::put_verified`).
 3. marks the home entry `shared: false`.
 
 The object itself stays in your storage — unsharing only stops *serving*
-it. Search for it stops working; existing copies on other peers (imo staleness
-is unavoidable without GC) remain but are no longer refreshed.
+it. Search for it stops working; existing copies on other peers (stale copies
+are unavoidable without GC) remain but are no longer refreshed. A recipient who
+already received an encrypted copy can still decrypt it: unsharing is not
+remote deletion or cryptographic revocation.
 
 ## The home index as the share ledger
 

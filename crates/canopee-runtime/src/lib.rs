@@ -1,4 +1,7 @@
+#![allow(clippy::collapsible_if)]
+
 mod capabilities;
+mod folder_sync;
 mod http;
 mod pairing;
 mod records;
@@ -63,6 +66,12 @@ pub struct Runtime {
     /// The active publish/serve session (if any), so the node can back a
     /// `StopServeSession` request and replace an older session cleanly.
     pub(crate) serve: Arc<RwLock<Option<Arc<serve::ServeSession>>>>,
+    /// See `PeerEnrichment`: keeps background peer-name resolution off the
+    /// query path and off the back of every refresh tick.
+    pub(crate) peer_enrichment: PeerEnrichment,
+    /// Serializes folder-sync passes so the periodic task and an explicit
+    /// `sync now` can never apply the same manifest concurrently.
+    pub(crate) folder_sync_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Clone)]
@@ -91,6 +100,16 @@ impl SharedSet {
     pub(crate) async fn remove(&self, id: &ObjectId) {
         self.ids.write().await.remove(&id.0);
     }
+}
+
+/// Throttle and mutual exclusion for background peer-name enrichment, so hot
+/// query paths (the tray's 2 s refresh, `NodeCommand::Peers`) can ask for
+/// friendly names without paying the per-peer DHT cost inline — see
+/// `Runtime::request_peer_enrichment`.
+#[derive(Clone, Default)]
+pub(crate) struct PeerEnrichment {
+    in_flight: Arc<std::sync::atomic::AtomicBool>,
+    last_started: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
 }
 
 struct StorageObjectProvider {
@@ -242,6 +261,8 @@ impl Runtime {
             shared,
             pairing: Arc::new(RwLock::new(None)),
             serve: Arc::new(RwLock::new(None)),
+            peer_enrichment: PeerEnrichment::default(),
+            folder_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
 
         if let Ok(Some(index)) = runtime.load_home_index().await {
@@ -249,10 +270,13 @@ impl Runtime {
         }
 
         runtime.reshare_public_user_records().await;
-        runtime.register_device().await;
+        runtime.reconcile_sync_shared().await;
+        runtime.register_device_local().await;
         runtime.schedule_device_publish();
         runtime.spawn_pairing_handler();
         runtime.spawn_periodic_sync();
+        runtime.spawn_periodic_folder_sync();
+        runtime.spawn_folder_watcher();
 
         Ok(runtime)
     }
@@ -574,12 +598,10 @@ impl Runtime {
             data.extend_from_slice(&object.payload.data);
         }
 
-        let object = Object::new(&self.identity(), data, ObjectType::Blob);
+        let object = self
+            .put_object_for(data, ObjectType::Blob, name, &[])
+            .await?;
         let id = object.id.clone();
-        self.storage.put_verified(&object).await?;
-        if let Some(name) = name {
-            self.storage.set_name(&id, &name).await?;
-        }
         tracing::info!("concat [{}] -> {id}", inputs);
         self.announce(id.clone()).await?;
         // Best-effort push to connected peers; a relay/edge with no store
@@ -631,7 +653,7 @@ impl Runtime {
         }
         if !matches!(
             object.object_type(),
-            ObjectType::Blob | ObjectType::AppManifest
+            ObjectType::Blob | ObjectType::AppManifest | ObjectType::SyncFile
         ) {
             anyhow::bail!("system records cannot be deleted");
         }
@@ -676,6 +698,8 @@ pub(crate) const RESOLVE_DHT_TIMEOUT: std::time::Duration = std::time::Duration:
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::await_holding_lock)]
+
     use super::*;
     use canopee_identity::Identity;
     use canopee_storage::{ObjectType, Verify};
@@ -912,6 +936,81 @@ mod tests {
         assert_ne!(runtime_a.config.state_path(), runtime_b.config.state_path());
         assert!(runtime_a.config.state_path().starts_with(&app_a));
         assert!(runtime_b.config.state_path().starts_with(&app_b));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn private_user_metadata_is_encrypted_at_rest() {
+        let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let base =
+            std::env::temp_dir().join(format!("canopee_runtime_meta_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let runtime = Runtime::open_with_root(base.clone()).await.unwrap();
+
+        let note = b"private contact note".to_vec();
+        let list = canopee_storage::ContactList {
+            contacts: vec![canopee_storage::Contact {
+                name: "bob".into(),
+                peer_id: "12D3KooB".into(),
+                dh_public_key: [4u8; 32],
+                note: Some(String::from_utf8(note.clone()).unwrap()),
+            }],
+            version: 0,
+        };
+        runtime.save_contact_list(&list).await.unwrap();
+        let contacts = runtime
+            .resolve_pointer(runtime.identity.id(), canopee_storage::RECORD_CONTACTS)
+            .await
+            .unwrap()
+            .unwrap();
+        let stored = runtime
+            .storage
+            .get_verified(&contacts.manifest)
+            .await
+            .unwrap();
+        assert!(Runtime::is_encrypted(&stored));
+        assert!(!stored.payload.data.windows(note.len()).any(|w| w == note));
+        assert_eq!(
+            runtime.load_contact_list().await.unwrap().unwrap().contacts[0].note,
+            Some(String::from_utf8(note).unwrap())
+        );
+
+        let blob = runtime
+            .put_object(b"taxes".to_vec(), ObjectType::Blob, None)
+            .await
+            .unwrap();
+        let index = canopee_storage::HomeIndex {
+            profile: None,
+            contacts: Some(contacts.manifest),
+            entries: vec![canopee_storage::HomeEntry {
+                name: "taxes.pdf".into(),
+                object: blob.id,
+                object_type: ObjectType::Blob,
+                shared: false,
+                app: None,
+            }],
+            version: 0,
+        };
+        runtime.save_home_index(&index).await.unwrap();
+        let home = runtime
+            .resolve_pointer(runtime.identity.id(), canopee_storage::RECORD_HOME)
+            .await
+            .unwrap()
+            .unwrap();
+        let stored = runtime.storage.get_verified(&home.manifest).await.unwrap();
+        assert!(Runtime::is_encrypted(&stored));
+        assert_eq!(
+            runtime.load_home_index().await.unwrap().unwrap().entries[0].name,
+            "taxes.pdf"
+        );
+
+        let published = runtime
+            .put_object_public(b"public app asset".to_vec(), ObjectType::Blob, None)
+            .await
+            .unwrap();
+        let stored = runtime.storage.get_verified(&published.id).await.unwrap();
+        assert!(!Runtime::is_encrypted(&stored));
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -1406,9 +1505,20 @@ mod tests {
         })
         .await
         .expect("timed out waiting for the pushed object to land in B's store");
-        let b_copy = runtime_b.get(&combined).await.unwrap();
+        let b_copy = runtime_b.storage.get_verified(&combined).await.unwrap();
         assert!(b_copy.verify());
-        assert_eq!(b_copy.payload.data, b"one-two");
+        assert!(
+            Runtime::is_encrypted(&b_copy),
+            "a concatenation is encrypted before it is replicated"
+        );
+        assert!(
+            runtime_b.get(&combined).await.is_err(),
+            "a different identity must not be able to read the concatenation"
+        );
+        assert_eq!(
+            runtime_a.get(&combined).await.unwrap().payload.data,
+            b"one-two"
+        );
         assert!(
             runtime_b.cache.is_cached(&combined).await,
             "a pushed foreign object must be marked cached in B"

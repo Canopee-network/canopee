@@ -159,8 +159,7 @@ fn register_macos() -> anyhow::Result<()> {
     let contents = bundle.join("Contents");
     std::fs::create_dir_all(contents.join("MacOS"))?;
 
-    let plist = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
+    let plist = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -186,7 +185,7 @@ fn register_macos() -> anyhow::Result<()> {
 </dict>
 </plist>
 "#
-    );
+    .to_string();
     std::fs::write(contents.join("Info.plist"), plist)?;
 
     let script = contents.join("MacOS").join("canopee-handler");

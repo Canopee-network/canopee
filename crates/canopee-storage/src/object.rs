@@ -71,6 +71,11 @@ pub enum ObjectType {
     /// under `(owner, "capabilities")` — the revocation-tracked record that
     /// backs "who is allowed to do what" (technical vision §5.5).
     CapabilityIndex,
+    /// Internal Canopee Sync file index. The payload is a chunk manifest that
+    /// reconstructs one synced file; the chunks themselves are `Blob` objects.
+    /// The folder-sync manifest entry points at this object, while
+    /// `content_hash` covers the whole plaintext file.
+    SyncFile,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

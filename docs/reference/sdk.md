@@ -24,9 +24,9 @@ let client = CanopeeClient::connect().await?; // default node.sock
 
 | Method | Notes |
 |---|---|
-| `put(data, name?) -> ObjectId` | store locally |
-| `put_object(data, type, name?) -> ObjectId` | typed object |
-| `put_file(name, data) -> ObjectId` | file-typed |
+| `put(data, name?) -> ObjectId` | store locally, encrypted to this identity |
+| `put_object(data, type, name?) -> ObjectId` | typed object, encrypted to this identity |
+| `put_file(name, data) -> ObjectId` | file-typed, encrypted to this identity |
 | `set_name(id, name)` | local convenience alias |
 | `get(id) -> Object` | retrieve by id (verified path) |
 | `list() -> Vec<ObjectInfo>` | local listing |
@@ -62,7 +62,8 @@ let client = CanopeeClient::connect().await?; // default node.sock
 | `save_home_index(index)` / `load_home_index()` | `(owner, "home")` |
 | `set_home_entry_shared(name, shared)` | share / unshare the entry |
 | `share_object(id, name)` | upsert shared entry + announce provider |
-| `unshare(name)` | withdraw announcement + undo entry |
+| `share_object_for(name, id, app, recipients)` | publish a copy encrypted to owner + recipients |
+| `unshare(name)` | withdraw announcement + undo entry; does not erase existing recipient copies |
 
 ## Usernames
 
@@ -81,10 +82,23 @@ let client = CanopeeClient::connect().await?; // default node.sock
 
 ## Sync
 
+Record refresh:
+
 | Method | Notes |
 |---|---|
 | `sync_with_peer(peer_id) -> SyncResult` | refresh from one peer |
 | `sync_with_all_devices() -> SyncResult` | refresh from every registered device |
+
+Folder sync:
+
+| Method | Notes |
+|---|---|
+| `sync_create_root(path, name) -> SyncRootInfo` | create root + local mapping; name defaults to folder name |
+| `sync_join_root(name, path) -> SyncRootInfo` | map an existing root locally; existing files are preserved |
+| `sync_list_roots() -> Vec<SyncRootInfo>` | roots with local mappings and revisions |
+| `sync_status(name) -> Vec<SyncRootInfo>` | one root, or all when `name` is `None` |
+| `sync_now(name) -> Vec<SyncRunResult>` | one pull/push pass; all local roots when `name` is `None` |
+| `sync_remove_root(name)` | drop the local mapping only |
 
 ## Capabilities
 

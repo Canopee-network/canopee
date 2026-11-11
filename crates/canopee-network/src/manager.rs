@@ -16,8 +16,8 @@ use libp2p::kad::{self, store::MemoryStore};
 use libp2p::multiaddr::Protocol;
 use libp2p::request_response::{self, ProtocolSupport};
 use libp2p::{
-    autonat, dcutr, gossipsub, identify, mdns, noise, ping, relay, tcp, yamux, Multiaddr, PeerId,
-    StreamProtocol, SwarmBuilder,
+    Multiaddr, PeerId, StreamProtocol, SwarmBuilder, autonat, dcutr, gossipsub, identify, mdns,
+    noise, ping, relay, tcp, yamux,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -50,10 +50,10 @@ pub const DEFAULT_BOOTSTRAP_ADDRS: &[&str] =
 /// `canopee listen-via-relay`. On by default; set `CANOPEE_AUTO_RELAY=0`
 /// (also `false`, `no`, `off`) to disable.
 fn auto_relay() -> bool {
-    match std::env::var("CANOPEE_AUTO_RELAY").ok().as_deref() {
-        Some("0") | Some("false") | Some("no") | Some("off") => false,
-        _ => true,
-    }
+    !matches!(
+        std::env::var("CANOPEE_AUTO_RELAY").ok().as_deref(),
+        Some("0") | Some("false") | Some("no") | Some("off")
+    )
 }
 
 /// Returns the list of bootstrap multiaddrs to dial at startup.
@@ -112,6 +112,34 @@ fn bootstrap_addrs() -> Vec<Multiaddr> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct NetworkOptions {
+    pub mdns: bool,
+    pub bootstrap_addrs: Vec<Multiaddr>,
+    pub auto_relay: bool,
+}
+
+impl Default for NetworkOptions {
+    fn default() -> Self {
+        Self {
+            mdns: true,
+            bootstrap_addrs: bootstrap_addrs(),
+            auto_relay: auto_relay(),
+        }
+    }
+}
+
+impl NetworkOptions {
+    pub fn isolated() -> Self {
+        Self {
+            mdns: false,
+            bootstrap_addrs: Vec::new(),
+            auto_relay: false,
+        }
+    }
+}
+
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait ObjectProvider: Send + Sync + 'static {
     async fn get_object(&self, id: &ObjectId) -> Option<ExportBundle>;
@@ -122,6 +150,7 @@ pub trait ObjectProvider: Send + Sync + 'static {
 /// storage backing the `ObjectProvider`'s reads — `put_verified` re-verifies
 /// the sender's signature as part of persisting, so an invalid push is
 /// rejected at the storage engine rather than trusted on arrival.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait ObjectStore: Send + Sync + 'static {
     async fn put_verified(&self, object: &canopee_storage::Object) -> anyhow::Result<()>;
@@ -253,6 +282,25 @@ pub struct NetworkManager {
 }
 
 impl NetworkManager {
+    pub fn new(
+        device_key: Keypair,
+        listen_addr: Multiaddr,
+        object_provider: Arc<dyn ObjectProvider>,
+        object_store: Arc<dyn ObjectStore>,
+        mdns: bool,
+    ) -> anyhow::Result<Self> {
+        Self::with_options(
+            device_key,
+            listen_addr,
+            object_provider,
+            object_store,
+            NetworkOptions {
+                mdns,
+                ..NetworkOptions::default()
+            },
+        )
+    }
+
     /// Builds a swarm for `device_key` — the node's *device* keypair, whose
     /// public key is the machine's network identity. The person identity key
     /// is deliberately not used for networking: device keys let several
@@ -272,15 +320,18 @@ impl NetworkManager {
     /// land — normally the same storage that backs `object_provider`. Gate
     /// store-persistence the same way the rest of object storage is gated:
     /// anything accepted by `put_verified` is signature-verified first.
-    pub fn new(
+    pub fn with_options(
         device_key: Keypair,
         listen_addr: Multiaddr,
         object_provider: Arc<dyn ObjectProvider>,
         object_store: Arc<dyn ObjectStore>,
-        mdns: bool,
+        options: NetworkOptions,
     ) -> anyhow::Result<Self> {
         // create peer_id from the device key...
         let peer_id = PeerId::from(device_key.public());
+        let mdns_enabled = options.mdns;
+        let bootstrap = options.bootstrap_addrs;
+        let auto_relay = options.auto_relay;
 
         // build Swarm with relay client and behabviour
         let mut swarm = SwarmBuilder::with_existing_identity(device_key)
@@ -341,7 +392,7 @@ impl NetworkManager {
 
                 let ping = ping::Behaviour::new(ping::Config::default());
 
-                let mdns = if mdns {
+                let mdns = if mdns_enabled {
                     Some(
                         mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id).map_err(
                             |e| Box::<dyn std::error::Error + Send + Sync>::from(e.to_string()),
@@ -385,7 +436,6 @@ impl NetworkManager {
         swarm.listen_on(listen_addr)?;
 
         // dial bootstrap nodes so a fresh node gets its first routing-table entries
-        let bootstrap = bootstrap_addrs();
         if !bootstrap.is_empty() {
             tracing::info!("Dialing {} bootstrap address(es)", bootstrap.len());
         }
@@ -400,7 +450,7 @@ impl NetworkManager {
         // NAT'd node can be dialed via the relay (and dcutr then upgrades the
         // relayed path to a direct connection when possible) with zero manual
         // `listen-via-relay`. Disable with CANOPEE_AUTO_RELAY=0.
-        if auto_relay() {
+        if auto_relay {
             for addr in &bootstrap {
                 let circuit_addr = addr.clone().with(Protocol::P2pCircuit);
                 if let Err(e) = swarm.listen_on(circuit_addr.clone()) {
@@ -868,7 +918,9 @@ mod tests {
         clear_bootstrap_env();
         with_env(
             "CANOPEE_BOOTSTRAP_ADDRS",
-            Some("/ip4/127.0.0.1/tcp/9999/p2p/12D3KooWGiPk75fg8HBW7WJCouTTTLNi8W3s48sBK8AKewZKbCjC,not-a-multiaddr,,  "),
+            Some(
+                "/ip4/127.0.0.1/tcp/9999/p2p/12D3KooWGiPk75fg8HBW7WJCouTTTLNi8W3s48sBK8AKewZKbCjC,not-a-multiaddr,,  ",
+            ),
             || {
                 let addrs = addrs();
                 assert_eq!(addrs.len(), 1, "garbage and blanks must be skipped");

@@ -143,7 +143,7 @@ pub(crate) async fn home(ids: bool) {
     }
 }
 
-pub(crate) async fn sync(peer_id: Option<String>) {
+pub(crate) async fn sync_records(peer_id: Option<String>) {
     let client = super::common::client_or_exit().await;
     let result = match peer_id {
         Some(peer_id) => client.sync_with_peer(peer_id).await,

@@ -27,6 +27,11 @@ impl Runtime {
                 if peer_count == 0 {
                     continue;
                 }
+                // Refresh connected peers' friendly names. This runs in the
+                // background (throttled, never concurrent) because
+                // `NodeCommand::Peers` no longer resolves them inline —
+                // otherwise a headless node would never resolve them at all.
+                runtime.request_peer_enrichment();
                 match runtime.sync_with_all_devices().await {
                     Ok(result) if result.any_updated() => {
                         tracing::info!("periodic sync: {result:?}");
@@ -85,7 +90,7 @@ impl Runtime {
     /// peers' stores at publish time), falling back to the DHT only when no
     /// connected peer delivered one, last-writer-wins by the signed pointer's
     /// `published_at`. Returns `true` when the record was refreshed.
-    async fn sync_record(&self, name: &str) -> anyhow::Result<bool> {
+    pub(crate) async fn sync_record(&self, name: &str) -> anyhow::Result<bool> {
         let owner = self.identity.id().clone();
         let key = AppPointerRecord::key(&owner, name);
         let cache_path = self
@@ -107,7 +112,8 @@ impl Runtime {
             };
             if is_newer {
                 self.fetch_object(pushed.manifest.clone(), None).await?;
-                self.cache_record(&key, &bincode::serialize(&pushed)?).await?;
+                self.cache_record(&key, &bincode::serialize(&pushed)?)
+                    .await?;
                 tracing::info!(
                     "sync: refreshed {name} from pushed pointer (published_at {})",
                     pushed.published_at
@@ -148,7 +154,8 @@ impl Runtime {
             return Ok(false);
         }
         self.fetch_object(dht_record.manifest.clone(), None).await?;
-        self.cache_record(&key, &bincode::serialize(&dht_record)?).await?;
+        self.cache_record(&key, &bincode::serialize(&dht_record)?)
+            .await?;
         tracing::info!(
             "sync: refreshed {name} (published_at {})",
             dht_record.published_at

@@ -363,6 +363,49 @@ impl Runtime {
         Ok(())
     }
 
+    /// Requests a background peer-name enrichment (see [`Self::enrich_peers`]).
+    ///
+    /// At most one pass runs at a time and starts are spaced
+    /// `PEER_ENRICH_MIN_INTERVAL` apart, so callers on a hot path — the
+    /// tray's refresh loop, `NodeCommand::Peers` — can ask for friendly names
+    /// as often as they like without stacking per-peer DHT lookups behind it.
+    pub fn request_peer_enrichment(&self) {
+        const PEER_ENRICH_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
+        let enrich = &self.peer_enrichment;
+        {
+            let last = enrich
+                .last_started
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(at) = *last
+                && at.elapsed() < PEER_ENRICH_MIN_INTERVAL
+            {
+                return;
+            }
+        }
+        if enrich
+            .in_flight
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
+        {
+            let mut last = enrich
+                .last_started
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *last = Some(std::time::Instant::now());
+        }
+
+        let runtime = self.clone();
+        let in_flight = enrich.in_flight.clone();
+        tokio::spawn(async move {
+            let _ = runtime.enrich_peers().await;
+            in_flight.store(false, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+
     /// Reverse-resolves a friendly `username` to its canonical owner
     /// (`canopee://identity/<peer-id>`) via the DHT registry, then verifies
     /// the claim by checking the returned owner really publishes a matching
@@ -588,15 +631,7 @@ impl Runtime {
         Ok(id)
     }
 
-    /// Adds (or refreshes) one device entry on the owner's device list and
-    /// republishes it. Re-registering an existing device keeps its original
-    /// `added_at`.
-    pub async fn add_device(
-        &self,
-        device_id: &str,
-        device_name: &str,
-    ) -> anyhow::Result<DeviceList> {
-        let mut list = self.load_device_list_merged().await?;
+    fn upsert_device(list: &mut DeviceList, device_id: &str, device_name: &str) {
         let added_at = list.by_device_id(device_id).and_then(|d| d.added_at);
         if !list.devices.iter().any(|d| d.device_id == device_id) {
             list.devices.push(DeviceEntry {
@@ -608,8 +643,86 @@ impl Runtime {
             entry.device_name = device_name.to_string();
             entry.added_at = added_at.or(Some(OffsetDateTime::now_utc()));
         }
+    }
+
+    /// Adds (or refreshes) one device entry on the owner's device list and
+    /// republishes it. Re-registering an existing device keeps its original
+    /// `added_at`.
+    pub async fn add_device(
+        &self,
+        device_id: &str,
+        device_name: &str,
+    ) -> anyhow::Result<DeviceList> {
+        let mut list = self.load_device_list_merged().await?;
+        Self::upsert_device(&mut list, device_id, device_name);
         let _ = self.save_device_list(&list).await?;
         Ok(list)
+    }
+
+    async fn add_device_local(
+        &self,
+        device_id: &str,
+        device_name: &str,
+    ) -> anyhow::Result<DeviceList> {
+        let mut list = self
+            .load_device_list_local(self.identity.id())
+            .await?
+            .unwrap_or(DeviceList {
+                devices: vec![],
+                version: 0,
+            });
+        Self::upsert_device(&mut list, device_id, device_name);
+        let _ = self.save_device_list_local(&list).await?;
+        Ok(list)
+    }
+
+    async fn load_device_list_local(
+        &self,
+        owner: &IdentityId,
+    ) -> anyhow::Result<Option<DeviceList>> {
+        let key = AppPointerRecord::key(owner, RECORD_DEVICES);
+        let path = self
+            .config
+            .records_path()
+            .join(format!("{}.record", hex::encode(&key)));
+        let Ok(bytes) = tokio::fs::read(&path).await else {
+            return Ok(None);
+        };
+        let Ok(record) = bincode::deserialize::<AppPointerRecord>(&bytes) else {
+            return Ok(None);
+        };
+        if record.owner != *owner || record.name != RECORD_DEVICES || !record.verify() {
+            return Ok(None);
+        }
+        let Ok(object) = self.storage.get_verified(&record.manifest).await else {
+            return Ok(None);
+        };
+        if object.payload.owner != *owner {
+            return Ok(None);
+        }
+        Ok(Some(object.decode()?))
+    }
+
+    async fn save_device_list_local(&self, list: &DeviceList) -> anyhow::Result<ObjectId> {
+        let version = self
+            .load_device_list_local(self.identity.id())
+            .await?
+            .map(|l| l.version + 1)
+            .unwrap_or(1);
+        let mut list = list.clone();
+        list.version = version;
+        let object = list.to_object(&self.identity)?;
+        let id = object.id.clone();
+        self.storage.put_verified(&object).await?;
+        let record = AppPointerRecord::sign(&self.identity, RECORD_DEVICES, id.clone())?;
+        let key = AppPointerRecord::key(&record.owner, RECORD_DEVICES);
+        let records_path = self.config.records_path();
+        tokio::fs::create_dir_all(&records_path).await?;
+        let path = records_path.join(format!("{}.record", hex::encode(&key)));
+        let tmp = path.with_extension("tmp");
+        tokio::fs::write(&tmp, bincode::serialize(&record)?).await?;
+        tokio::fs::rename(&tmp, &path).await?;
+        Ok(id)
     }
 
     /// Removes one device from the owner's device list and republishes it.
@@ -639,6 +752,24 @@ impl Runtime {
             tracing::warn!("registering this device in the device list failed: {e}");
         }
         self.publish_device_registry().await;
+    }
+
+    /// Registers this device without touching the network, so startup can
+    /// reach the control socket before any DHT/replication round-trip.
+    /// `schedule_device_publish` performs the network merge once peers exist.
+    pub(crate) async fn register_device_local(&self) {
+        let peer_id = self.device_key.peer_id();
+        if let Err(e) = self
+            .add_device_local(&peer_id.to_string(), self.device_key.device_name())
+            .await
+        {
+            tracing::warn!("registering this device in the device list failed: {e}");
+        }
+        let key = Self::device_registry_key(&peer_id);
+        let value = self.identity.id().to_string().into_bytes();
+        if let Err(e) = self.cache_record(&key, &value).await {
+            tracing::warn!("caching device registry record failed: {e}");
+        }
     }
 
     /// Brings the local `(owner, "devices")` list in line with what the
@@ -855,6 +986,7 @@ impl Runtime {
             None => return Ok(None),
         };
         let object = self.storage.get_verified(&record.manifest).await?;
+        let object = self.open_object(&object)?;
         Ok(Some(object.decode()?))
     }
 
@@ -868,9 +1000,15 @@ impl Runtime {
             .unwrap_or(1);
         let mut list = list.clone();
         list.version = version;
-        let object = list.to_object(&self.identity)?;
+        let object = self
+            .put_object_for(
+                bincode::serialize(&list)?,
+                ObjectType::ContactList,
+                None,
+                &[],
+            )
+            .await?;
         let id = object.id.clone();
-        self.storage.put_verified(&object).await?;
         self.publish_pointer(RECORD_CONTACTS, id.clone()).await?;
         Ok(id)
     }

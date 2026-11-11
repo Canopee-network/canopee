@@ -32,14 +32,16 @@ matching signed `(owner, "username")` record. A peer that stuffs someone
 else's name into the registry can't produce the matching signed record, so
 the lookup fails closed.
 
-## Use a username anywhere a peer id works
+## Use a username where the CLI supports it
 
-Once a name is claimed, the CLI accepts it wherever a peer id is expected:
+`fetch` accepts a claimed username in place of a peer id:
 
 ```bash
 canopee fetch alice <object-id>     # instead of canopee fetch 12D3KooW... <id>
-canopee sync alice                  # refresh records from alice
 ```
+
+Not every command resolves usernames yet: `canopee sync records` currently
+takes a raw peer id, not a username.
 
 `canopee peers` renders names when available: a profile display name
 (`Profile.display_name`) is preferred, then the username, then a shortened

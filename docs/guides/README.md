@@ -13,7 +13,8 @@ you're new; each relies only on what's above it plus the
 - [Chatting between peers](chat-between-peers.md) — live pub/sub chat on one
   network (LAN + over the public relay).
 - [Multi-device identity](multi-device-identity.md) — one identity on many
-  devices: pairing, syncing, and exporting/importing the identity key.
+  devices: pairing, record refresh, encrypted folder sync, and
+  exporting/importing the identity key.
 - [Usernames](usernames.md) — claim a globally unique `canopee` username and
   be addressable by name.
 

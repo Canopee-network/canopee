@@ -207,10 +207,8 @@ mod tests {
     use crate::Verify;
 
     async fn identity() -> Identity {
-        let dir = std::env::temp_dir().join(format!(
-            "canopee_storage_user_test_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("canopee_storage_user_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("identity.key");
         let path_str = path.to_str().unwrap();
@@ -226,10 +224,7 @@ mod tests {
     #[tokio::test]
     async fn user_objects_roundtrip_through_disk_and_verify() {
         let clock = identity().await;
-        let root = std::env::temp_dir().join(format!(
-            "canopee_user_store_{}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("canopee_user_store_{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let storage = crate::Storage::new(root.to_str().unwrap());
 
@@ -293,10 +288,8 @@ mod tests {
     #[tokio::test]
     async fn device_list_roundtrips_through_disk_and_verify() {
         let clock = identity().await;
-        let root = std::env::temp_dir().join(format!(
-            "canopee_dev_list_store_{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("canopee_dev_list_store_{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let storage = crate::Storage::new(root.to_str().unwrap());
 

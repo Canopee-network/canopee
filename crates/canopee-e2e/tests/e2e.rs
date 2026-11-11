@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Overall guard so a hung node can never hang the test suite forever.
-const SCENARIO_TIMEOUT: Duration = Duration::from_secs(180);
+const SCENARIO_TIMEOUT: Duration = Duration::from_secs(240);
 /// How long to wait for one node's Unix socket to appear after spawn.
 const SOCKET_TIMEOUT: Duration = Duration::from_secs(30);
 /// mDNS discovery + connection establishment on localhost.
@@ -267,6 +267,10 @@ struct EdgeProc {
     http_port: u16,
     /// The edge's dialable multiaddr (`/ip4/127.0.0.1/tcp/<port>/p2p/<id>`).
     addr: String,
+    /// Kept alive for the lifetime of the edge: dropping the receiver ends
+    /// the stdout reader thread, which closes the pipe and makes the edge
+    /// panic on its next print.
+    _stdout: std::sync::mpsc::Receiver<String>,
 }
 
 impl EdgeProc {
@@ -296,6 +300,7 @@ impl EdgeProc {
             child,
             http_port,
             addr,
+            _stdout: rx,
         }
     }
 }
@@ -1038,15 +1043,20 @@ fn two_nodes_sync_profile() {
         a.cli_ok(&["profile", "--name", "Alice"]);
 
         // 4. B syncs until it sees the profile (DHT propagation is async).
+        // The runtime's periodic sync can import the profile between this
+        // manual call's cache read and its DHT lookup; the manual call then
+        // correctly reports "Already up to date" instead of "profile
+        // updated". Treat the profile being visible as success either way.
         let deadline = Instant::now() + DHT_TIMEOUT;
         loop {
-            let out = b2.cli_ok(&["sync"]);
-            if out.contains("profile updated") {
+            let out = b2.cli_ok(&["sync", "records"]);
+            let profile = b2.cli_ok(&["profile"]);
+            if out.contains("profile updated") || profile.contains("Alice") {
                 break;
             }
             assert!(
                 Instant::now() < deadline,
-                "B never saw A's profile after sync"
+                "B never saw A's profile after sync (last sync output: {out:?})"
             );
             std::thread::sleep(Duration::from_secs(2));
         }
@@ -1409,4 +1419,422 @@ fn two_nodes_periodic_sync() {
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);
     }
+}
+
+/// Folder sync acceptance test for Canopee Sync v1.
+///
+/// Scenario:
+///   1. A and B pair, and B restarts under A's identity.
+///   2. A creates a `docs` sync root with a nested file.
+///   3. B joins the root and pulls the initial manifest.
+///   4. Both devices converge on the nested file.
+///   5. A local write on B triggers a watcher sync without `sync now`.
+///   6. B edits a file and creates another; A receives both.
+///   7. Deletes propagate in both directions.
+///   8. An offline edit on B conflicts with A's edit; one version wins at
+///      the original path and the other is preserved as a conflict copy,
+///      published in the same sync pass.
+///   9. Delete-vs-edit keeps the edit in both directions.
+///  10. A deletes while B is stopped; the tombstone survives B's restart.
+///  11. Neither device's object store contains plaintext file content.
+#[test]
+fn two_nodes_sync_folder() {
+    let started = Instant::now();
+    let (node_bin, cli_bin) = build_binaries();
+
+    let base = std::env::temp_dir().join(format!("canopee_e2e_folder_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let home_a = base.join("a");
+    let home_b = base.join("b");
+    let folder_a = base.join("folder-a");
+    let folder_b = base.join("folder-b");
+
+    std::fs::create_dir_all(folder_a.join("sub")).unwrap();
+    std::fs::create_dir_all(&folder_b).unwrap();
+    let hello = b"hello from canopee sync";
+    let large: Vec<u8> = (0usize..(3 * 1024 * 1024))
+        .map(|i| (i.wrapping_mul(31).wrapping_add(7) % 251) as u8)
+        .collect();
+    std::fs::write(folder_a.join("hello.txt"), hello).unwrap();
+    std::fs::write(folder_a.join("large.bin"), &large).unwrap();
+    std::fs::write(folder_a.join("sub/nested.txt"), b"nested file").unwrap();
+    std::fs::write(folder_a.join("delete-local.txt"), b"delete me on B").unwrap();
+    std::fs::write(folder_b.join("existing.txt"), b"keep me").unwrap();
+
+    let mut a = TestNode::spawn(&node_bin, &cli_bin, &home_a);
+    let mut b = TestNode::spawn(&node_bin, &cli_bin, &home_b);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // 1. Pair B onto A, then restart B so it shares A's identity.
+        let out = b.cli_ok(&["pair"]);
+        let code = out
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("Pairing code: ").map(str::to_string))
+            .unwrap_or_else(|| panic!("no pairing code in: {out}"));
+        let payload = out
+            .lines()
+            .find_map(|l| {
+                l.trim()
+                    .strip_prefix("canopee pair ")
+                    .map(|s| s.split(" --code").next().unwrap().to_string())
+            })
+            .unwrap_or_else(|| panic!("no qr payload in: {out}"));
+        a.cli_ok(&["pair", &payload, "--code", &code]);
+
+        b.stop();
+        let mut b2 = TestNode::spawn(&node_bin, &cli_bin, &home_b);
+        assert_eq!(
+            b2.identity_id(),
+            a.identity_id(),
+            "B must adopt A's identity after pairing"
+        );
+
+        // 2. A creates the root; B joins it at a different local path.
+        a.cli_ok(&[
+            "sync",
+            "create",
+            folder_a.to_str().unwrap(),
+            "--name",
+            "docs",
+        ]);
+        let deadline = Instant::now() + DHT_TIMEOUT;
+        loop {
+            let (ok, _, stderr) = b2.cli(&["sync", "join", "docs", folder_b.to_str().unwrap()]);
+            if ok {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "B never resolved A's root index: {stderr}"
+            );
+            std::thread::sleep(Duration::from_secs(1));
+        }
+
+        // 3. Pull until the initial tree has arrived.
+        let deadline = Instant::now() + DHT_TIMEOUT;
+        loop {
+            b2.cli_ok(&["sync", "now", "docs"]);
+            if file_equals(&folder_b.join("hello.txt"), hello)
+                && file_equals(&folder_b.join("large.bin"), &large)
+                && file_equals(&folder_b.join("sub/nested.txt"), b"nested file")
+                && file_equals(&folder_b.join("delete-local.txt"), b"delete me on B")
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "B never received A's sync root; destination contains: {:?}",
+                list_tree(&folder_b)
+            );
+            std::thread::sleep(Duration::from_secs(1));
+        }
+
+        // 4. Plaintext must not be present in either encrypted object store.
+        for (name, home) in [("A", &home_a), ("B", &home_b)] {
+            assert!(
+                !dir_contains_bytes(&home.join(".canopee/storage"), hello),
+                "{name}'s object store contains plaintext file content"
+            );
+        }
+
+        // 5. The watcher runs a pass after a local write without `sync now`.
+        //    Restart B first so its 30s periodic timer cannot mask a broken
+        //    watcher during this short check.
+        b2.stop();
+        b2 = TestNode::spawn(&node_bin, &cli_bin, &home_b);
+        b2.wait_for_peer(&a.device_peer_id());
+        a.wait_for_peer(&b2.device_peer_id());
+        let before = last_sync_millis(&b2, "docs");
+        std::fs::write(folder_b.join("watcher.txt"), b"watched").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if last_sync_millis(&b2, "docs") > before {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "watcher did not sync a local write; status: {}",
+                b2.cli_ok(&["sync", "status", "docs"])
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        }
+
+        // 6. Edits made on B propagate back to A.
+        let from_b = b"edited on B";
+        std::fs::write(folder_b.join("hello.txt"), from_b).unwrap();
+        std::fs::write(folder_b.join("from-b.txt"), b"created on B").unwrap();
+
+        let deadline = Instant::now() + DHT_TIMEOUT;
+        loop {
+            b2.cli_ok(&["sync", "now", "docs"]);
+            a.cli_ok(&["sync", "now", "docs"]);
+            if file_equals(&folder_a.join("hello.txt"), from_b)
+                && file_equals(&folder_a.join("from-b.txt"), b"created on B")
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "A never received B's edits; destination contains: {:?}",
+                list_tree(&folder_a)
+            );
+            std::thread::sleep(Duration::from_secs(1));
+        }
+
+        // Joining must not delete pre-existing local files in v1.
+        assert!(
+            file_equals(&folder_b.join("existing.txt"), b"keep me"),
+            "join must not delete unrelated local files"
+        );
+
+        // 7. A local delete on B propagates to A as a tombstone.
+        std::fs::remove_file(folder_b.join("delete-local.txt")).unwrap();
+        let deadline = Instant::now() + DHT_TIMEOUT;
+        loop {
+            b2.cli_ok(&["sync", "now", "docs"]);
+            a.cli_ok(&["sync", "now", "docs"]);
+            if !folder_a.join("delete-local.txt").exists()
+                && !folder_b.join("delete-local.txt").exists()
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "B's delete never reached A; destination contains: {:?}",
+                list_tree(&folder_a)
+            );
+            std::thread::sleep(Duration::from_secs(1));
+        }
+
+        // 8. Stop B and make B's conflicting edits while it is offline. Then
+        //    reconnect B before A publishes DHT so the pointer push is
+        //    deterministic; B still has not synced since its offline edit.
+        b2.stop();
+        let from_a = b"edited on A while B was offline";
+        let from_b_offline = b"edited on B while A was offline";
+        let offline_a = b"created while B was down";
+        std::fs::write(folder_b.join("hello.txt"), from_b_offline).unwrap();
+
+        let mut b3 = TestNode::spawn(&node_bin, &cli_bin, &home_b);
+        assert_eq!(
+            b3.identity_id(),
+            a.identity_id(),
+            "B must keep A's identity after restart"
+        );
+        b3.wait_for_peer(&a.device_peer_id());
+        a.wait_for_peer(&b3.device_peer_id());
+
+        std::fs::write(folder_a.join("hello.txt"), from_a).unwrap();
+        std::fs::write(folder_a.join("offline-a.txt"), offline_a).unwrap();
+        std::fs::remove_file(folder_a.join("sub/nested.txt")).unwrap();
+        a.cli_ok(&["sync", "now", "docs"]);
+
+        let deadline = Instant::now() + DHT_TIMEOUT;
+        loop {
+            b3.cli_ok(&["sync", "now", "docs"]);
+            if conflict_pair_matches(&folder_b, from_a, from_b_offline)
+                && file_equals(&folder_b.join("offline-a.txt"), offline_a)
+                && !folder_b.join("sub/nested.txt").exists()
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "B did not resolve the conflict; destination contains: {:?}",
+                list_tree(&folder_b)
+            );
+            std::thread::sleep(Duration::from_secs(1));
+        }
+
+        // The conflict copy must be published in the same pass, so one A sync
+        // is enough to receive it.
+        let deadline = Instant::now() + DHT_TIMEOUT;
+        loop {
+            a.cli_ok(&["sync", "now", "docs"]);
+            if conflict_pair_matches(&folder_a, from_a, from_b_offline)
+                && !folder_a.join("sub/nested.txt").exists()
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "A did not receive B's conflict copy; destination contains: {:?}",
+                list_tree(&folder_a)
+            );
+            std::thread::sleep(Duration::from_secs(1));
+        }
+
+        // Extra sync passes must not duplicate conflict files or resurrect
+        // the deleted file.
+        b3.cli_ok(&["sync", "now", "docs"]);
+        a.cli_ok(&["sync", "now", "docs"]);
+        b3.cli_ok(&["sync", "now", "docs"]);
+        assert_eq!(conflict_files(&folder_a).len(), 1);
+        assert_eq!(conflict_files(&folder_b).len(), 1);
+        assert!(!folder_a.join("sub/nested.txt").exists());
+        assert!(!folder_b.join("sub/nested.txt").exists());
+
+        // 9. Delete-vs-edit keeps the edit in both directions. B makes its
+        //    changes while stopped; reconnect it before A publishes.
+        b3.stop();
+        let remote_edit = b"remote modification wins over local delete";
+        let local_edit = b"local modification wins over remote delete";
+        std::fs::remove_file(folder_b.join("hello.txt")).unwrap();
+        std::fs::write(folder_b.join("offline-a.txt"), local_edit).unwrap();
+
+        let mut b4 = TestNode::spawn(&node_bin, &cli_bin, &home_b);
+        b4.wait_for_peer(&a.device_peer_id());
+        a.wait_for_peer(&b4.device_peer_id());
+
+        std::fs::write(folder_a.join("hello.txt"), remote_edit).unwrap();
+        std::fs::remove_file(folder_a.join("offline-a.txt")).unwrap();
+        a.cli_ok(&["sync", "now", "docs"]);
+        let deadline = Instant::now() + DHT_TIMEOUT;
+        loop {
+            b4.cli_ok(&["sync", "now", "docs"]);
+            if file_equals(&folder_b.join("hello.txt"), remote_edit)
+                && file_equals(&folder_b.join("offline-a.txt"), local_edit)
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "delete-vs-edit did not converge on B; destination contains: {:?}",
+                list_tree(&folder_b)
+            );
+            std::thread::sleep(Duration::from_secs(1));
+        }
+
+        let deadline = Instant::now() + DHT_TIMEOUT;
+        loop {
+            a.cli_ok(&["sync", "now", "docs"]);
+            if file_equals(&folder_a.join("hello.txt"), remote_edit)
+                && file_equals(&folder_a.join("offline-a.txt"), local_edit)
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "delete-vs-edit did not converge on A; destination contains: {:?}",
+                list_tree(&folder_a)
+            );
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        assert_eq!(conflict_files(&folder_a).len(), 1);
+        assert_eq!(conflict_files(&folder_b).len(), 1);
+
+        // 10. The tombstone survives a restart: B must not resurrect the file.
+        b4.stop();
+        let mut b5 = TestNode::spawn(&node_bin, &cli_bin, &home_b);
+        b5.cli_ok(&["sync", "now", "docs"]);
+        assert!(
+            !folder_b.join("sub/nested.txt").exists(),
+            "restarted B resurrected a deleted file"
+        );
+        assert!(!folder_b.join("delete-local.txt").exists());
+        assert_eq!(conflict_files(&folder_b).len(), 1);
+
+        // 11. Newly synced plaintext must also stay out of both stores.
+        let plaintexts: [&[u8]; 3] = [&from_b_offline[..], &remote_edit[..], &local_edit[..]];
+        for content in plaintexts {
+            for (name, home) in [("A", &home_a), ("B", &home_b)] {
+                assert!(
+                    !dir_contains_bytes(&home.join(".canopee/storage"), content),
+                    "{name}'s object store contains plaintext sync content"
+                );
+            }
+        }
+        let chunk_probe = &large[1_000_000..1_004_096];
+        for (name, home) in [("A", &home_a), ("B", &home_b)] {
+            assert!(
+                !dir_contains_bytes(&home.join(".canopee/storage"), chunk_probe),
+                "{name}'s object store contains a plaintext sync chunk"
+            );
+        }
+        b5.stop();
+    }));
+
+    a.stop();
+    b.stop();
+    let _ = std::fs::remove_dir_all(&base);
+
+    assert!(
+        started.elapsed() < SCENARIO_TIMEOUT,
+        "scenario exceeded its time budget"
+    );
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+fn last_sync_millis(node: &TestNode, root: &str) -> u64 {
+    node.cli_ok(&["sync", "status", root])
+        .split("last sync ")
+        .nth(1)
+        .and_then(|tail| tail.split_whitespace().next())
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0)
+}
+
+fn conflict_pair_matches(root: &Path, first: &[u8], second: &[u8]) -> bool {
+    let conflicts = conflict_files(root);
+    if conflicts.len() != 1 {
+        return false;
+    }
+    let hello = root.join("hello.txt");
+    (file_equals(&hello, first) && file_equals(&conflicts[0], second))
+        || (file_equals(&hello, second) && file_equals(&conflicts[0], first))
+}
+
+fn conflict_files(root: &Path) -> Vec<PathBuf> {
+    list_tree(root)
+        .into_iter()
+        .filter(|path| path.contains(".conflict-"))
+        .map(|path| root.join(path))
+        .filter(|path| path.is_file())
+        .collect()
+}
+
+fn file_equals(path: &Path, expected: &[u8]) -> bool {
+    std::fs::read(path)
+        .map(|actual| actual == expected)
+        .unwrap_or(false)
+}
+
+fn dir_contains_bytes(path: &Path, needle: &[u8]) -> bool {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return false;
+    };
+    entries.filter_map(Result::ok).any(|entry| {
+        let path = entry.path();
+        if path.is_dir() {
+            dir_contains_bytes(&path, needle)
+        } else {
+            std::fs::read(&path)
+                .map(|bytes| bytes.windows(needle.len()).any(|window| window == needle))
+                .unwrap_or(false)
+        }
+    })
+}
+
+fn list_tree(path: &Path) -> Vec<String> {
+    fn visit(root: &Path, dir: &Path, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if let Ok(rel) = path.strip_prefix(root) {
+                out.push(rel.display().to_string());
+            }
+            if path.is_dir() {
+                visit(root, &path, out);
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    visit(path, path, &mut out);
+    out.sort();
+    out
 }

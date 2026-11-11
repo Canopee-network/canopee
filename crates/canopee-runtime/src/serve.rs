@@ -106,13 +106,13 @@ impl Runtime {
         let edge_peer_id = peer_id_from_multiaddr(&edge_addr).ok_or_else(|| {
             anyhow::anyhow!("edge address must end with /p2p/<peer-id>: {edge_addr}")
         })?;
-        self.network.dial(edge_addr.clone()).await?;
-
         // Dialing is asynchronous; the serve-registry protocol needs an
         // established connection (or at least a known address) before the
-        // registration request can be sent. Wait for the peer to show up,
-        // mirroring the pairing flow's dial-then-wait.
+        // registration request can be sent. Retry the dial until the peer
+        // shows up: an edge may have bound its listener but not yet be ready
+        // to accept when the publisher starts.
         let deadline = Instant::now() + EDGE_DIAL_TIMEOUT;
+        let mut last_dial_error = None;
         loop {
             if let Ok(peers) = self.network.peers().await {
                 if peers.iter().any(|p| p.peer_id == edge_peer_id) {
@@ -120,7 +120,13 @@ impl Runtime {
                 }
             }
             if Instant::now() >= deadline {
-                anyhow::bail!("could not connect to the edge at {edge_addr}");
+                match last_dial_error {
+                    Some(e) => anyhow::bail!("could not connect to the edge at {edge_addr}: {e}"),
+                    None => anyhow::bail!("could not connect to the edge at {edge_addr}"),
+                }
+            }
+            if let Err(e) = self.network.dial(edge_addr.clone()).await {
+                last_dial_error = Some(e.to_string());
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
@@ -263,7 +269,7 @@ impl Runtime {
         let manifest_object = self.open_object(
             &self
                 .storage
-                .get_verified(&app_id)
+                .get_verified(app_id)
                 .await
                 .map_err(|e| anyhow::anyhow!("app manifest {app_id} missing: {e}"))?,
         )?;

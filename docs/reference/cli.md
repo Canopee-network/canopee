@@ -31,7 +31,7 @@ and `canopee start` are the exceptions (see below).
 | Command | What it does |
 |---|---|
 | `canopee list` | List your stored objects (name, type, size, …). |
-| `canopee put <path>` | Store a file (or text) as an object locally. `--ids` shows the raw id. |
+| `canopee put <path>` | Store a file (or text) as an object locally, encrypted to this identity by default. `--ids` shows the raw id. |
 | `canopee get <id\|name>` | Retrieve an object by id or stored name. `--output <file>` writes bytes to a file; otherwise prints to stdout (as UTF-8 text when possible). |
 | `canopee desc <id\|name>` | Show metadata (owner, type, size, name) plus a preview so you can tell what a stored name actually is. |
 | `canopee export <id>` | Export an object as a portable `ExportBundle` (stdout/file). |
@@ -51,12 +51,31 @@ and `canopee start` are the exceptions (see below).
 
 | Command | What it does |
 |---|---|
-| `canopee share <name> [id]` | Share a stored object under a name: upsert `shared:true` in the home index, publish `(owner,"entry:<name>")` pointer, announce on DHT. `[id]` may be a raw id or a stored name; omit to share the object already named `<name>`. |
+| `canopee share <name> [id]` | Share a stored object under a name: upsert `shared:true` in the home index, publish `(owner,"entry:<name>")` pointer, announce on DHT. `[id]` may be a raw id or a stored name; omit to share the object already named `<name>`. Add `--to <contact>` to publish a separate copy encrypted to that contact. |
 | `canopee unshare <name>` | Stop sharing: withdraw DHT provider announcement and stop serving the entry. Record removed from the public pointer set. |
 | `canopee fetch <peer\|identity\|username> <id\|name>` | Fetch an object from a specific peer. `<id>` may be a raw 64-char hex id (direct fetch) or a name the peer shared it under (resolve `(owner,"entry:<name>")` first). `<peer>` may be a peer id, `canopee://identity/...`, or a username. |
 | `canopee announce <id\|name>` | Announce on the DHT that this node provides the object (provider record). |
 | `canopee find-providers <id\|name>` | List peer ids that have announced themselves as providers of the object. |
-| `canopee sync [peer-id]` | Refresh user records (profile, contacts, devices) from the network. No argument: sync from every registered device. With a peer id: from that peer. |
+
+## Sync
+
+Two different operations share the command group:
+
+| Command | What it does |
+|---|---|
+| `canopee sync records [peer-id]` | Refresh **user records** (profile, contacts, devices, home) from the network. No argument: sync from every registered device. With a peer id: from that peer. |
+| `canopee sync create <path> [--name <name>]` | Create an encrypted **folder sync** root and map it locally. `--name` defaults to the folder name. |
+| `canopee sync join <name> <path>` | Map an existing account sync root to a local folder. Existing local files are preserved and uploaded as local additions. |
+| `canopee sync list` | List sync roots and their local mappings/revisions. |
+| `canopee sync status [name]` | Show one root, or every root: local path, revision, and last-sync timestamp. |
+| `canopee sync now [name]` | Run one pull/push pass for one root, or every local root. |
+| `canopee sync remove <name>` | Remove the local mapping only; remote data and the folder stay. |
+
+Folder sync watches local roots and triggers a pass about 500 ms after changes
+while the node is started and connected; a 30-second periodic pass is the
+fallback, and `sync now` forces a pass. Same-path edits are preserved as an
+original plus `<name>.conflict-<UTC-millis>`. See [Canopee Sync v1](sync-v1.md)
+for the exact semantics and gaps.
 
 ## Pub/sub
 

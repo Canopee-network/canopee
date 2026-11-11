@@ -6,7 +6,7 @@ pub mod peer;
 pub use libp2p::{Multiaddr, PeerId};
 pub use manager::{
     DEFAULT_BOOTSTRAP_ADDRS, InboundPairing, InboundServe, InboundServeRegistration,
-    NetworkManager, ObjectProvider, ObjectStore,
+    NetworkManager, NetworkOptions, ObjectProvider, ObjectStore,
 };
 pub use message::{
     CanopeePairingRequest, CanopeePairingResponse, ObjectRequest, ObjectResponse, PubSubMessage,

@@ -242,8 +242,8 @@ fn parse_range(header: Option<&str>, len: usize) -> Option<RangeSpec> {
 
 /// gzip-compresses `body` into a new vec (returns the gzip bytes).
 fn gzip_body(body: &[u8]) -> std::io::Result<Vec<u8>> {
-    use flate2::write::GzEncoder;
     use flate2::Compression;
+    use flate2::write::GzEncoder;
     use std::io::Write;
     let mut encoder = GzEncoder::new(Vec::with_capacity(body.len()), Compression::default());
     encoder.write_all(body)?;
@@ -414,20 +414,24 @@ mod tests {
         // No gzip unless the client asks; binary types never compress.
         let plain = get(&files, "GET", "/style.css");
         assert_eq!(resp_header(&plain, "vary"), "Accept-Encoding");
-        assert!(!plain
-            .headers
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("content-encoding")));
+        assert!(
+            !plain
+                .headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("content-encoding"))
+        );
 
         let png = render_response(&files, "GET", "/img.png", &headers);
-        assert!(!png
-            .headers
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("content-encoding")));
-        assert!(!png
-            .headers
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("vary")));
+        assert!(
+            !png.headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("content-encoding"))
+        );
+        assert!(
+            !png.headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("vary"))
+        );
     }
 
     #[test]

@@ -19,9 +19,10 @@ relays over the internet). Apps talk to the local node over a Unix socket via
 `canopee-sdk`, or embed `canopee-runtime` directly — they never touch the
 network stack by hand.
 
-The current focus is **multi-device identity**: one identity shared across a
-laptop, a phone, a desktop — via LAN pairing (QR + typed code), DHT-based
-sync, and per-device keys.
+The current focus is **multi-device identity and encrypted folder sync**: one
+identity shared across a laptop, a phone, a desktop — via LAN pairing (QR +
+typed code), per-device keys, DHT-based record refresh, and Canopee Sync roots.
+See [`HANDOFF_RESUME.md`](HANDOFF_RESUME.md) for the current work state.
 
 ---
 
@@ -50,6 +51,7 @@ CANOPEE/
 │   │   ├── guides/             #   how to do it
 │   │   └── reference/          #   the exacts (CLI, env, paths, protocols)
 │   ├── scripts/e2e.sh          # two-node end-to-end shell test
+│   ├── HANDOFF_RESUME.md       # current work state / next-session handoff
 │   ├── ONBOARDING.md           # ← you are here
 │   └── README.md               # overview / crate map / docs index
 ```
@@ -76,8 +78,8 @@ Three tiers, cheapest to most realistic **(E2E must run single-threaded —
 see the note below)**:
 
 ```bash
-# 1. Unit tests
-cargo test --workspace
+# 1. Unit tests (e2e is run separately, serially)
+cargo test --workspace --exclude canopee-e2e
 
 # 2. Real-swarm integration (networking: dial + mDNS + request/response)
 cargo test -p canopee-network
@@ -89,15 +91,18 @@ cargo test -p canopee-e2e -- --test-threads=1
 The full pre-release gate is:
 
 ```bash
-cargo build --workspace
-cargo test --workspace -- --test-threads=1
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --exclude canopee-e2e
+cargo test -p canopee-e2e --test e2e -- --test-threads=1
 ```
 
 **Why `--test-threads=1` for e2e:** the e2e tests bind real ports/sockets and
 spawn real processes; parallel runners can collide. This is documented in the
-tests and enforced by running them serially.
+tests and enforced by running them serially. The full e2e suite takes roughly
+six minutes on a healthy host.
 
-You can also run the same scenario as a plain shell script (good for CI
+You can also run the sharing scenario as a plain shell script (good for CI
 without the cargo harness):
 
 ```bash
@@ -107,7 +112,9 @@ scripts/e2e.sh
 What e2e actually proves (from `crates/canopee-e2e`): two nodes discover each
 other via mDNS; an object is private by default (fetch refused); after
 `share` it is discoverable as a provider and fetchable; after `unshare` the
-fetch is refused again.
+fetch is refused again. The suite also covers pairing/restart, periodic record
+sync, and folder sync (offline edits, deletes, conflict copies, tombstones, and
+no plaintext in object stores).
 
 ---
 
@@ -143,10 +150,10 @@ shape of it:
 - Each crate has its own `README.md` with implementation-level detail; the
   crate map and docs index link to all of them.
 - The runtime's internals are split across domain modules — `records.rs`,
-  `sharing.rs`, `capabilities.rs`, `pairing.rs`, `sync.rs` — each an `impl
-  Runtime` block over the single `struct Runtime` in `lib.rs`. Keep new
-  runtime operations in the module they belong to, and mark cross-module
-  private items `pub(crate)`.
+  `sharing.rs`, `capabilities.rs`, `pairing.rs`, `sync.rs` (user records), and
+  `folder_sync.rs` (Canopee Sync) — each an `impl Runtime` block over the
+  single `struct Runtime` in `lib.rs`. Keep new runtime operations in the
+  module they belong to, and mark cross-module private items `pub(crate)`.
 - The network manager is split between `src/manager.rs` and its
   `src/manager/event_loop.rs` submodule (the swarm event loop). Free
   functions there are `pub(super)`.
@@ -165,3 +172,7 @@ shape of it:
 - [docs/concepts/architecture.md](docs/concepts/architecture.md) — the crate
   map and data flow in depth.
 - [docs/reference/cli.md](docs/reference/cli.md) — every `canopee` command.
+- [docs/reference/sync-v1.md](docs/reference/sync-v1.md) — Canopee Sync
+  contract, current behavior, and remaining gaps.
+- [`HANDOFF_RESUME.md`](HANDOFF_RESUME.md) — where the last session stopped and
+  what to verify/prove next.
